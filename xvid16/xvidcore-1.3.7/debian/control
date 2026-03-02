@@ -1,0 +1,46 @@
+Source: xvidcore
+Section: libs
+Priority: optional
+Maintainer: Debian Multimedia Maintainers <debian-multimedia@lists.debian.org>
+Uploaders: Loïc Martin <loic.martin3@gmail.com>,
+           Reinhard Tartler <siretart@tauware.de>,
+           Fabian Greffrath <fabian@debian.org>
+Build-Depends: debhelper-compat (= 12),
+               yasm (>= 1.0) [any-i386 amd64]
+Standards-Version: 4.5.0
+Homepage: https://labs.xvid.com/source/
+Vcs-Git: https://salsa.debian.org/multimedia-team/xvidcore.git
+Vcs-Browser: https://salsa.debian.org/multimedia-team/xvidcore
+Rules-Requires-Root: no
+
+Package: libxvidcore4
+Architecture: any
+Multi-Arch: same
+Pre-Depends: ${misc:Pre-Depends}
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Description: Open source MPEG-4 video codec (library)
+ Xvid (formerly XviD) is an open source MPEG-4 video codec, implementing MPEG-4
+ Simple Profile, Advanced Simple Profile, and Advanced Video Coding standards.
+ It is written in C with assembler optimizations for quality and speed
+ (including MMX, SSE, and 3Dnow! code for i386 and AltiVec for PowerPC), and is
+ especially optimized towards offline, multi-pass compression for storage and
+ archival purposes.
+ .
+ This package contains the shared library.
+
+Package: libxvidcore-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libxvidcore4 (= ${binary:Version}),
+         ${misc:Depends}
+Description: Open source MPEG-4 video codec (development)
+ Xvid (formerly XviD) is an open source MPEG-4 video codec, implementing MPEG-4
+ Simple Profile, Advanced Simple Profile, and Advanced Video Coding standards.
+ It is written in C with assembler optimizations for quality and speed
+ (including MMX, SSE, and 3Dnow! code for i386 and AltiVec for PowerPC), and is
+ especially optimized towards offline, multi-pass compression for storage and
+ archival purposes.
+ .
+ This package contains the development files.

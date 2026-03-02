@@ -1,0 +1,262 @@
+# Makefile.watcom
+# Build xvidcore-1.3.7 as a 32-bit static library (decode-only)
+# using OpenWatcom C/C++ for the Win32s helper DLL (xvid32.dll).
+#
+# Building on Linux with OpenWatcom cross-compiler.
+#
+# Usage:
+#   wmake -f Makefile.watcom          Build xvidcore.lib
+#   wmake -f Makefile.watcom clean    Remove build artefacts
+#
+# Output: xvidcore.lib  (static lib, link into xvid32.dll)
+#
+# Only the decoder-side translation units are compiled.
+# Encoder, rate-control, and 2-pass stat files are excluded.
+# x86 MMX/SSE asm is also excluded to keep the build pure C —
+# the C fallbacks are used instead (adequate for a Win32s helper).
+# -----------------------------------------------------------------------
+
+# ---- Paths ---------------------------------------------------------------
+
+# Two levels up from build/win32 is the src tree
+SRC = ../../src
+
+# ---- Compiler ------------------------------------------------------------
+
+CC     = wcc386
+AR     = wlib
+AFLAGS = -q -b -n    # wlib: quiet, create binary, new lib
+
+# ---- Compiler flags ------------------------------------------------------
+#
+#  -bt=windows   Win32 (flat) target
+#  -mf           flat memory model
+#  -fpi87        inline x87 FP instructions
+#  -fp5          optimise for Pentium FPU scheduling
+#  -ox           full optimisation (ob2 + oi + ol + om + op + or + os + ot)
+#  -s            no stack-overflow checks (smaller, faster)
+#  -w3           warning level 3
+#  -zq           quiet (no banner)
+#  -DWIN32       define WIN32 (xvidcore checks this)
+#  -DNDEBUG      disable assertions
+#  -DNO_ASM      disable all x86 asm acceleration (use C fallbacks)
+#
+# Include paths cover every sub-directory that has headers.
+
+CFLAGS = -bt=nt -mf -fpi87 -fp5 -ox -s -w3 -zq &
+         -DWIN32 -DNDEBUG -DNO_ASM -DARCH_IS_GENERIC -DARCH_IS_32BIT &
+         -I$(SRC) &
+         -I$(SRC)/bitstream &
+         -I$(SRC)/dct &
+         -I$(SRC)/image &
+         -I$(SRC)/motion &
+         -I$(SRC)/prediction &
+         -I$(SRC)/quant &
+         -I$(SRC)/utils
+
+# -----------------------------------------------------------------------
+# Source -> object mappings  (decode-only subset)
+# -----------------------------------------------------------------------
+
+# Top-level: global init and the decore() entry point
+OBJ_CORE = &
+    xvid.obj &
+    decoder.obj
+
+# Bitstream parsing
+OBJ_BS = &
+    bitstream.obj &
+    cbp.obj &
+    mbcoding.obj
+
+# DCT (both needed: idct for decode, fdct referenced by mbtransquant)
+OBJ_DCT = &
+    idct.obj &
+    fdct.obj
+
+# Motion compensation + estimation_common (defines roundtab_76/79 used by decoder)
+OBJ_MOTION = &
+    gmc.obj &
+    motion_comp.obj &
+    estimation_common.obj &
+    sad.obj
+
+# Image / colorspace / post-processing / font (image_printf)
+OBJ_IMAGE = &
+    colorspace.obj &
+    image.obj &
+    interpolate8x8.obj &
+    qpel.obj &
+    postprocessing.obj &
+    font.obj
+
+# Utilities
+OBJ_UTILS = &
+    mem_align.obj &
+    emms.obj &
+    mbtransquant.obj &
+    mem_transfer.obj
+
+# Intra-prediction
+OBJ_PRED = &
+    mbprediction.obj
+
+# Dequantisation (mpeg4 and h263 variants)
+OBJ_QUANT = &
+    quant_mpeg.obj &
+    quant_matrix.obj &
+    quant_h263.obj
+
+# Encoder stubs (decode-only build: enc_create/encode/destroy return error)
+OBJ_STUBS = &
+    enc_stubs.obj
+
+ALL_OBJ = &
+    $(OBJ_CORE) &
+    $(OBJ_BS) &
+    $(OBJ_DCT) &
+    $(OBJ_MOTION) &
+    $(OBJ_IMAGE) &
+    $(OBJ_UTILS) &
+    $(OBJ_PRED) &
+    $(OBJ_QUANT) &
+    $(OBJ_STUBS)
+
+# -----------------------------------------------------------------------
+# Default target
+# -----------------------------------------------------------------------
+
+all: xvidcore.lib .SYMBOLIC
+
+xvidcore.lib: $(ALL_OBJ)
+	@echo Linking static library xvidcore.lib ...
+	$(AR) $(AFLAGS) xvidcore.lib &
+	    +xvid.obj &
+	    +decoder.obj &
+	    +bitstream.obj &
+	    +cbp.obj &
+	    +mbcoding.obj &
+	    +idct.obj &
+	    +fdct.obj &
+	    +gmc.obj &
+	    +motion_comp.obj &
+	    +estimation_common.obj &
+	    +sad.obj &
+	    +colorspace.obj &
+	    +image.obj &
+	    +interpolate8x8.obj &
+	    +qpel.obj &
+	    +postprocessing.obj &
+	    +font.obj &
+	    +mem_align.obj &
+	    +emms.obj &
+	    +mbtransquant.obj &
+	    +mem_transfer.obj &
+	    +mbprediction.obj &
+	    +quant_mpeg.obj &
+	    +quant_matrix.obj &
+	    +quant_h263.obj &
+	    +enc_stubs.obj
+	@echo Done: xvidcore.lib
+
+# -----------------------------------------------------------------------
+# Explicit rules for each source file
+# (wmake inference rules search one directory; explicit paths needed
+#  because sources live in sub-directories of ../../src/)
+# -----------------------------------------------------------------------
+
+# --- Core ---
+xvid.obj: $(SRC)/xvid.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/xvid.c -fo=$^@
+
+decoder.obj: $(SRC)/decoder.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/decoder.c -fo=$^@
+
+# --- Bitstream ---
+bitstream.obj: $(SRC)/bitstream/bitstream.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/bitstream/bitstream.c -fo=$^@
+
+cbp.obj: $(SRC)/bitstream/cbp.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/bitstream/cbp.c -fo=$^@
+
+mbcoding.obj: $(SRC)/bitstream/mbcoding.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/bitstream/mbcoding.c -fo=$^@
+
+# --- DCT ---
+idct.obj: $(SRC)/dct/idct.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/dct/idct.c -fo=$^@
+
+fdct.obj: $(SRC)/dct/fdct.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/dct/fdct.c -fo=$^@
+
+# --- Motion compensation ---
+gmc.obj: $(SRC)/motion/gmc.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/motion/gmc.c -fo=$^@
+
+motion_comp.obj: $(SRC)/motion/motion_comp.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/motion/motion_comp.c -fo=$^@
+
+# estimation_common.c defines roundtab_76 and roundtab_79 used by decoder
+estimation_common.obj: $(SRC)/motion/estimation_common.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/motion/estimation_common.c -fo=$^@
+
+sad.obj: $(SRC)/motion/sad.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/motion/sad.c -fo=$^@
+
+# --- Image / colorspace ---
+colorspace.obj: $(SRC)/image/colorspace.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/image/colorspace.c -fo=$^@
+
+image.obj: $(SRC)/image/image.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/image/image.c -fo=$^@
+
+interpolate8x8.obj: $(SRC)/image/interpolate8x8.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/image/interpolate8x8.c -fo=$^@
+
+qpel.obj: $(SRC)/image/qpel.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/image/qpel.c -fo=$^@
+
+postprocessing.obj: $(SRC)/image/postprocessing.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/image/postprocessing.c -fo=$^@
+
+# font.c provides image_printf (debug overlay, harmless to include)
+font.obj: $(SRC)/image/font.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/image/font.c -fo=$^@
+
+# --- Utils ---
+mem_align.obj: $(SRC)/utils/mem_align.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/utils/mem_align.c -fo=$^@
+
+emms.obj: $(SRC)/utils/emms.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/utils/emms.c -fo=$^@
+
+mbtransquant.obj: $(SRC)/utils/mbtransquant.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/utils/mbtransquant.c -fo=$^@
+
+mem_transfer.obj: $(SRC)/utils/mem_transfer.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/utils/mem_transfer.c -fo=$^@
+
+# --- Intra prediction ---
+mbprediction.obj: $(SRC)/prediction/mbprediction.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/prediction/mbprediction.c -fo=$^@
+
+# --- Quantisation tables ---
+quant_mpeg.obj: $(SRC)/quant/quant_mpeg.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/quant/quant_mpeg.c -fo=$^@
+
+quant_matrix.obj: $(SRC)/quant/quant_matrix.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/quant/quant_matrix.c -fo=$^@
+
+quant_h263.obj: $(SRC)/quant/quant_h263.c .AUTODEPEND
+	$(CC) $(CFLAGS) $(SRC)/quant/quant_h263.c -fo=$^@
+
+# --- Encoder stubs (decode-only build) ---
+enc_stubs.obj: enc_stubs.c .AUTODEPEND
+	$(CC) $(CFLAGS) enc_stubs.c -fo=$^@
+
+# -----------------------------------------------------------------------
+# Clean
+# -----------------------------------------------------------------------
+
+clean: .SYMBOLIC
+	rm -f *.obj *.err xvidcore.lib

@@ -1,0 +1,14 @@
+# mcimp3.lnk - wlink response file for 16-bit MCI MP3 driver
+system windows dll initinstance
+name mcimp3.drv
+file mcimp3.obj
+option map=mcimp3.map
+option quiet
+option modname=mcimp3
+option description 'MP3 Audio'
+option heapsize=8192
+library windows.lib
+library mmsystem.lib
+library clibl.lib
+# WEP must be RESIDENTNAME for Windows 3.x
+export WEP.1 RESIDENT

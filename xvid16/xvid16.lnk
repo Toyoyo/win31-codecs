@@ -1,0 +1,15 @@
+# xvid16.lnk - wlink response file for 16-bit VFW XviD codec
+system windows dll initinstance
+name xvid16.dll
+file codec16.obj
+option map=xvid16.map
+option quiet
+option modname=xvid16
+option description 'XviD MPEG-4 VFW Codec for Windows 3.1'
+option heapsize=1024
+library windows.lib
+library mmsystem.lib
+library clibl.lib
+# WEP must be RESIDENTNAME for Windows 3.x
+export WEP.1 RESIDENT
+export DriverProc.2

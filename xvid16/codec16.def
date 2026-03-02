@@ -1,0 +1,18 @@
+; codec16.def - Module Definition File for 16-bit VFW XviD Codec
+; OpenWatcom linker uses this file.
+
+LIBRARY         XVID16
+DESCRIPTION     'XviD MPEG-4 VFW Codec for Windows 3.1'
+
+EXETYPE         WINDOWS 3.1
+
+CODE            MOVEABLE DISCARDABLE
+DATA            MOVEABLE SINGLE
+
+HEAPSIZE        1024
+STACKSIZE       0
+
+; WEP must be RESIDENTNAME for Windows 3.x
+EXPORTS
+    WEP             @1 RESIDENTNAME
+    DriverProc      @2

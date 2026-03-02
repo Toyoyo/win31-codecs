@@ -1,0 +1,15 @@
+# mp2acm16.lnk - wlink response file for 16-bit MP2 ACM driver
+system windows dll initinstance
+name mp2acm16.acm
+file mp2acm.obj
+option map=mp2acm16.map
+option quiet
+option modname=mp2acm16
+option description 'MPEG-1 Layer 2 Audio ACM Codec for Windows 3.1'
+option heapsize=4096
+library windows.lib
+library mmsystem.lib
+library clibl.lib
+# WEP must be RESIDENTNAME for Windows 3.x
+export WEP.1 RESIDENT
+#export DriverProc.2

@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+export DEB_CFLAGS_MAINT_APPEND += $(shell dpkg-buildflags --get CPPFLAGS)
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed -Wl,--no-undefined
+
+export DEB_HOST_ARCH_CPU ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+export DEB_HOST_ARCH_OS  ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_OS)
+
+# Explicitely disable Altivec support on powerpc until we introduce flavours
+ifeq ($(DEB_HOST_ARCH_CPU),powerpc)
+	confflags += --disable-assembly
+endif
+
+# Explicitely disable yasm support on kfreebsd, it's broken on 64bit;
+# see: http://www.freebsd.org/cgi/cvsweb.cgi/ports/multimedia/xvid/Makefile?rev=1.36
+ifeq ($(DEB_HOST_ARCH_OS),kfreebsd)
+	confflags += --disable-assembly
+endif
+
+%:
+	dh $@ --sourcedirectory=build/generic
+
+override_dh_auto_configure:
+	cd build/generic && autoconf
+	dh_auto_configure -- $(confflags)
