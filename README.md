@@ -103,7 +103,7 @@ See `patched/README.md` for full patch details.
 
 ## Building
 
-All components are built with [OpenWatcom C/C++](https://www.openwatcom.org/). Set the `WATCOM` environment variable and run `make` (or `wmake`) in each subdirectory:
+All components are built with [OpenWatcom C/C++](https://github.com/open-watcom/open-watcom-v2). Set the `WATCOM` environment variable and run `make` (or `wmake`) in each subdirectory:
 
 ```bash
 export WATCOM=/path/to/openwatcom

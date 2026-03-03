@@ -141,7 +141,7 @@ ORed into the color-space value to let XviD handle the vertical flip.
 - Video for Windows 1.1e runtime
 
 ### Build
-- OpenWatcom C/C++ 2.0 (http://www.openwatcom.org) — SDK headers are included with OpenWatcom; xvidcore-1.3.7 is bundled in this repository
+- OpenWatcom C/C++ 2.0 (https://github.com/open-watcom/open-watcom-v2) — SDK headers are included with OpenWatcom; xvidcore-1.3.7 is bundled in this repository
 
 ## Building
 

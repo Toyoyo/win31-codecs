@@ -120,7 +120,7 @@ After restarting, the codec should be available to any ACM-aware application. Yo
 ## Credits
 
 - **minimp3**: By lieff (https://github.com/lieff/minimp3) - CC0 1.0 Universal
-- Built with [OpenWatcom](https://www.openwatcom.org/)
+- Built with [OpenWatcom](https://github.com/open-watcom/open-watcom-v2)
 
 ## License
 
