@@ -26,4 +26,4 @@ mcimp3.drv: mcimp3.obj mcimp3.res mcimp3.lnk
 	$(RC16) -bt=windows mcimp3.res mcimp3.drv
 
 clean: .SYMBOLIC
-	rm -f *.obj *.map *.res mcimp3.drv
+	rm -f *.obj *.map *.res *.err mcimp3.drv

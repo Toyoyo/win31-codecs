@@ -125,6 +125,7 @@ typedef struct {
     volatile BOOL bTaskRunning;      /* background task is in its loop */
     DWORD       dwSeekTarget;        /* target sample for CMD_SEEK */
     DWORD       dwPauseTick;         /* GetTickCount when last paused */
+    volatile WORD wGeneration;       /* incremented on close; task checks this */
 
     /* Output format (may differ from native if fallback was needed) */
     DWORD       dwOutSamplesPerSec;
@@ -161,7 +162,7 @@ static DWORD     MsToSamples(LPINSTANCE pS, DWORD ms);
 static DWORD     ToTimeFormat(LPINSTANCE pS, DWORD samples);
 static DWORD     FromTimeFormat(LPINSTANCE pS, DWORD val);
 static DWORD     StartPlayback(LPINSTANCE pS);
-static void      StopPlayback(LPINSTANCE pS);
+static BOOL      StopPlayback(LPINSTANCE pS);
 
 /* Lock/Unlock instance from device ID */
 static LPINSTANCE LockInstance(WORD wDeviceID)
@@ -624,9 +625,12 @@ void CALLBACK _export BackgroundTask(DWORD dwInst)
     int        i;
     WORD       cbFilled;
     BOOL       allDone;
+    WORD       myGen;
 
     pS = (LPINSTANCE)GlobalLock((HGLOBAL)(WORD)dwInst);
     if (!pS) return;
+
+    myGen = pS->wGeneration;
 
     /* Open our own file handle (file handles are per-task in Win16) */
     hf = _lopen(pS->szFileName, OF_READ | OF_SHARE_DENY_NONE);
@@ -746,7 +750,7 @@ void CALLBACK _export BackgroundTask(DWORD dwInst)
     pS->bTaskRunning = TRUE;
 
     /* ------- Main polling loop ------- */
-    while (pS->wCmd != CMD_STOP) {
+    while (pS->wCmd != CMD_STOP && pS->wGeneration == myGen) {
 
         /* Process foreground commands */
         switch (pS->wCmd) {
@@ -867,19 +871,28 @@ void CALLBACK _export BackgroundTask(DWORD dwInst)
     }
 
     /* ------- CMD_STOP: cleanup ------- */
-    pS->wCmd = CMD_NONE;
-    pS->dwBaseSamples = GetPositionSamples(pS);
 
+    /* Close waveOut regardless — we own this handle */
     waveOutReset(pS->hWaveOut);
     for (i = 0; i < NUM_BUFS; i++)
         if (pS->wh[i].dwFlags & WHDR_PREPARED)
             waveOutUnprepareHeader(pS->hWaveOut, &pS->wh[i], sizeof(WAVEHDR));
     waveOutClose(pS->hWaveOut);
+
+    _lclose(hf);
+
+    /* If generation changed, the foreground already gave up on us and may
+     * have freed or reused the instance memory.  Do NOT touch pS. */
+    if (pS->wGeneration != myGen) {
+        GlobalUnlock((HGLOBAL)(WORD)dwInst);
+        return;
+    }
+
+    pS->wCmd = CMD_NONE;
+    pS->dwBaseSamples = GetPositionSamples(pS);
     pS->hWaveOut    = NULL;
     pS->nBufsQueued = 0;
     pS->bMode       = MP_STOPPED;
-
-    _lclose(hf);
     pS->bTaskRunning = FALSE;
     pS->htaskBack    = NULL;
     GlobalUnlock((HGLOBAL)(WORD)dwInst);
@@ -931,13 +944,17 @@ static DWORD StartPlayback(LPINSTANCE pS)
     return 0;
 }
 
-static void StopPlayback(LPINSTANCE pS)
+/* Returns TRUE if task stopped cleanly, FALSE if it's still running (leaked) */
+static BOOL StopPlayback(LPINSTANCE pS)
 {
     WORD i;
     if (!pS->htaskBack && !pS->bTaskRunning) {
         pS->bMode = MP_STOPPED;
-        return;
+        return TRUE;
     }
+
+    /* Bump generation so orphaned task knows to exit without touching pS */
+    pS->wGeneration++;
 
     /* Signal background task to stop */
     pS->wCmd = CMD_STOP;
@@ -948,6 +965,12 @@ static void StopPlayback(LPINSTANCE pS)
         if (!pS->bTaskRunning && !pS->htaskBack)
             break;
     }
+
+    if (pS->bTaskRunning || pS->htaskBack) {
+        /* Task is stuck — caller must NOT free this instance */
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /* -----------------------------------------------------------------------
@@ -983,11 +1006,12 @@ static DWORD mci_CloseDriver(WORD wDevID)
     LPINSTANCE pS = LockInstance(wDevID);
     if (!pS) return 0;
 
-    StopPlayback(pS);
-    CloseMP3File(pS);
-
+    /* Clear stale references before stopping */
     if (g_hActiveInstance == (HGLOBAL)(WORD)mciGetDriverData(wDevID))
         g_hActiveInstance = NULL;
+
+    StopPlayback(pS);
+    CloseMP3File(pS);
 
     UnlockInstance(wDevID);
     return 0;
@@ -1457,6 +1481,7 @@ LRESULT CALLBACK _export DriverProc(DWORD dwDriverID, HANDLE hDriver,
     case DRV_CLOSE: {
         HGLOBAL    hState;
         LPINSTANCE pS;
+        BOOL       bStopped;
         int        i;
 
         /* Non-MCI close */
@@ -1465,12 +1490,25 @@ LRESULT CALLBACK _export DriverProc(DWORD dwDriverID, HANDLE hDriver,
         hState = (HGLOBAL)(WORD)mciGetDriverData((UINT)(WORD)dwDriverID);
         if (!hState) return 1;
 
+        /* Clear stale references before stopping */
+        if (g_hActiveInstance == hState)
+            g_hActiveInstance = NULL;
+        mciSetDriverData((UINT)(WORD)dwDriverID, 0L);
+
         pS = (LPINSTANCE)GlobalLock(hState);
         if (!pS) return 1;
 
-        StopPlayback(pS);
+        bStopped = StopPlayback(pS);
         CloseMP3File(pS);
 
+        if (!bStopped) {
+            /* Background task still running — leak the instance rather
+             * than freeing memory it's still using.  The orphaned task
+             * will see the generation change and exit without touching
+             * pS fields, then GlobalUnlock the handle. */
+            GlobalUnlock(hState);
+            return 1;
+        }
 
         for (i = 0; i < NUM_BUFS; i++) {
             if (pS->pPcmBuf[i]) GlobalUnlock(pS->hPcmBuf[i]);

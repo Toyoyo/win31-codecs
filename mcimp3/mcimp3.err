@@ -1,6 +1,0 @@
-./mmddk.h(60): Warning! E1177: Modifier repeated in declaration
-./mmddk.h(249): Warning! E1177: Modifier repeated in declaration
-./mmddk.h(369): Warning! E1177: Modifier repeated in declaration
-minimp3.h(1832): Warning! W202: Symbol 'i' has been defined, but not referenced
-mcimp3.c(223): Warning! W120: lvalue cast is not standard C
-minimp3.h(1830): Warning! W202: Symbol 'mp3dec_decode_known_frame' has been defined, but not referenced
