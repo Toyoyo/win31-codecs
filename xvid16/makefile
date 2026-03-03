@@ -70,7 +70,7 @@ CFLAGS16 = -bt=windows -ml -zW -zu -s -ox -w4 -fpi87 -zq -fo=.obj &
 #   -zq             quiet
 # -------------------------------------------------------------------------
 
-CFLAGS32 = -bt=nt -mf -fpi87 -ox -w4 -zq -fo=.obj &
+CFLAGS32 = -bt=nt -mf -ecc -fpi87 -ox -w4 -zq -fo=.obj &
            -I$(WIN32INC) &
            -I$(XVIDCORE)/src &
            -I.

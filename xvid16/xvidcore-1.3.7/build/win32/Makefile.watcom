@@ -25,11 +25,12 @@ SRC = ../../src
 
 CC     = wcc386
 AR     = wlib
+NASM   = nasm
 AFLAGS = -q -b -n    # wlib: quiet, create binary, new lib
 
 # ---- Compiler flags ------------------------------------------------------
 #
-#  -bt=windows   Win32 (flat) target
+#  -bt=nt        Win32 (flat) target
 #  -mf           flat memory model
 #  -fpi87        inline x87 FP instructions
 #  -fp5          optimise for Pentium FPU scheduling
@@ -39,12 +40,12 @@ AFLAGS = -q -b -n    # wlib: quiet, create binary, new lib
 #  -zq           quiet (no banner)
 #  -DWIN32       define WIN32 (xvidcore checks this)
 #  -DNDEBUG      disable assertions
-#  -DNO_ASM      disable all x86 asm acceleration (use C fallbacks)
+#  -DARCH_IS_IA32  enable x86 asm acceleration paths (MMX/MMXEXT)
 #
 # Include paths cover every sub-directory that has headers.
 
-CFLAGS = -bt=nt -mf -fpi87 -fp5 -ox -s -w3 -zq &
-         -DWIN32 -DNDEBUG -DNO_ASM -DARCH_IS_GENERIC -DARCH_IS_32BIT &
+CFLAGS = -bt=nt -mf -ecc -fpi87 -fp5 -ox -s -w3 -zq &
+         -DWIN32 -DNDEBUG -DARCH_IS_IA32 -DARCH_IS_32BIT &
          -I$(SRC) &
          -I$(SRC)/bitstream &
          -I$(SRC)/dct &
@@ -53,6 +54,15 @@ CFLAGS = -bt=nt -mf -fpi87 -fp5 -ox -s -w3 -zq &
          -I$(SRC)/prediction &
          -I$(SRC)/quant &
          -I$(SRC)/utils
+
+# ---- NASM flags ----------------------------------------------------------
+#
+#  -f win32      Win32 COFF object format (for wlink)
+#  -DWINDOWS     nasm.inc: use underscore-prefixed symbol names (_foo)
+#                matching OpenWatcom cdecl (-ecc) convention
+#  -I../../src/  resolve  %include "nasm.inc"  from the source root
+#
+NASMFLAGS = -f win32 -DWINDOWS -I../../src/
 
 # -----------------------------------------------------------------------
 # Source -> object mappings  (decode-only subset)
@@ -111,6 +121,67 @@ OBJ_QUANT = &
 OBJ_STUBS = &
     enc_stubs.obj
 
+# x86 SIMD objects (NASM, Pentium III: MMX + MMXEXT)
+# Assembled with -f win32 -DWINDOWS so symbols get underscore prefix
+# matching OpenWatcom cdecl.
+OBJ_ASM_UTILS = &
+    cpuid.obj &
+    mem_transfer_mmx.obj &
+    interlacing_mmx.obj
+
+OBJ_ASM_DCT = &
+    idct_mmx.obj &
+    fdct_mmx_skal.obj
+
+OBJ_ASM_MOTION = &
+    sad_mmx.obj &
+    sad_xmm.obj
+
+OBJ_ASM_IMAGE = &
+    interpolate8x8_mmx.obj &
+    interpolate8x8_xmm.obj &
+    colorspace_rgb_mmx.obj &
+    colorspace_yuv_mmx.obj &
+    colorspace_yuyv_mmx.obj &
+    gmc_mmx.obj &
+    postprocessing_mmx.obj &
+    qpel_mmx.obj
+
+OBJ_ASM_BS = &
+    cbp_mmx.obj
+
+OBJ_ASM_QUANT = &
+    quantize_h263_mmx.obj &
+    quantize_mpeg_mmx.obj &
+    quantize_mpeg_xmm.obj &
+    quantize_h263_3dne.obj
+
+# Remaining asm files — 3DNow, 3DNow Extended, SSE2, SSE3, SSE41, deinterlace.
+# A PIII will never execute these paths (CPUID won't set those flags), but
+# xvid.c takes their addresses unconditionally so the linker must resolve them.
+OBJ_ASM_REST = &
+    interpolate8x8_3dn.obj &
+    interpolate8x8_3dne.obj &
+    mem_transfer_3dne.obj &
+    sad_3dn.obj &
+    sad_3dne.obj &
+    idct_3dne.obj &
+    sad_sse2.obj &
+    cbp_sse2.obj &
+    fdct_sse2_skal.obj &
+    idct_sse2_dmitry.obj &
+    postprocessing_sse2.obj &
+    deintl_sse.obj
+
+OBJ_ASM = &
+    $(OBJ_ASM_UTILS) &
+    $(OBJ_ASM_DCT) &
+    $(OBJ_ASM_MOTION) &
+    $(OBJ_ASM_IMAGE) &
+    $(OBJ_ASM_BS) &
+    $(OBJ_ASM_QUANT) &
+    $(OBJ_ASM_REST)
+
 ALL_OBJ = &
     $(OBJ_CORE) &
     $(OBJ_BS) &
@@ -120,7 +191,8 @@ ALL_OBJ = &
     $(OBJ_UTILS) &
     $(OBJ_PRED) &
     $(OBJ_QUANT) &
-    $(OBJ_STUBS)
+    $(OBJ_STUBS) &
+    $(OBJ_ASM)
 
 # -----------------------------------------------------------------------
 # Default target
@@ -156,7 +228,39 @@ xvidcore.lib: $(ALL_OBJ)
 	    +quant_mpeg.obj &
 	    +quant_matrix.obj &
 	    +quant_h263.obj &
-	    +enc_stubs.obj
+	    +enc_stubs.obj &
+	    +cpuid.obj &
+	    +mem_transfer_mmx.obj &
+	    +interlacing_mmx.obj &
+	    +idct_mmx.obj &
+	    +fdct_mmx_skal.obj &
+	    +sad_mmx.obj &
+	    +sad_xmm.obj &
+	    +interpolate8x8_mmx.obj &
+	    +interpolate8x8_xmm.obj &
+	    +colorspace_rgb_mmx.obj &
+	    +colorspace_yuv_mmx.obj &
+	    +colorspace_yuyv_mmx.obj &
+	    +gmc_mmx.obj &
+	    +postprocessing_mmx.obj &
+	    +qpel_mmx.obj &
+	    +cbp_mmx.obj &
+	    +quantize_h263_mmx.obj &
+	    +quantize_mpeg_mmx.obj &
+	    +quantize_mpeg_xmm.obj &
+	    +quantize_h263_3dne.obj &
+	    +interpolate8x8_3dn.obj &
+	    +interpolate8x8_3dne.obj &
+	    +mem_transfer_3dne.obj &
+	    +sad_3dn.obj &
+	    +sad_3dne.obj &
+	    +idct_3dne.obj &
+	    +sad_sse2.obj &
+	    +cbp_sse2.obj &
+	    +fdct_sse2_skal.obj &
+	    +idct_sse2_dmitry.obj &
+	    +postprocessing_sse2.obj &
+	    +deintl_sse.obj
 	@echo Done: xvidcore.lib
 
 # -----------------------------------------------------------------------
@@ -255,8 +359,117 @@ enc_stubs.obj: enc_stubs.c .AUTODEPEND
 	$(CC) $(CFLAGS) enc_stubs.c -fo=$^@
 
 # -----------------------------------------------------------------------
+# NASM rules — x86 SIMD (MMX + MMXEXT, Pentium III)
+# -----------------------------------------------------------------------
+
+# Utils
+cpuid.obj: $(SRC)/utils/x86_asm/cpuid.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/utils/x86_asm/cpuid.asm -o $^@
+
+mem_transfer_mmx.obj: $(SRC)/utils/x86_asm/mem_transfer_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/utils/x86_asm/mem_transfer_mmx.asm -o $^@
+
+interlacing_mmx.obj: $(SRC)/utils/x86_asm/interlacing_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/utils/x86_asm/interlacing_mmx.asm -o $^@
+
+# DCT
+idct_mmx.obj: $(SRC)/dct/x86_asm/idct_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/dct/x86_asm/idct_mmx.asm -o $^@
+
+fdct_mmx_skal.obj: $(SRC)/dct/x86_asm/fdct_mmx_skal.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/dct/x86_asm/fdct_mmx_skal.asm -o $^@
+
+# Motion / SAD
+sad_mmx.obj: $(SRC)/motion/x86_asm/sad_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/motion/x86_asm/sad_mmx.asm -o $^@
+
+sad_xmm.obj: $(SRC)/motion/x86_asm/sad_xmm.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/motion/x86_asm/sad_xmm.asm -o $^@
+
+# Image / interpolation / colorspace
+interpolate8x8_mmx.obj: $(SRC)/image/x86_asm/interpolate8x8_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/interpolate8x8_mmx.asm -o $^@
+
+interpolate8x8_xmm.obj: $(SRC)/image/x86_asm/interpolate8x8_xmm.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/interpolate8x8_xmm.asm -o $^@
+
+colorspace_rgb_mmx.obj: $(SRC)/image/x86_asm/colorspace_rgb_mmx.asm
+	$(NASM) $(NASMFLAGS) -I$(SRC)/image/x86_asm/ $(SRC)/image/x86_asm/colorspace_rgb_mmx.asm -o $^@
+
+colorspace_yuv_mmx.obj: $(SRC)/image/x86_asm/colorspace_yuv_mmx.asm
+	$(NASM) $(NASMFLAGS) -I$(SRC)/image/x86_asm/ $(SRC)/image/x86_asm/colorspace_yuv_mmx.asm -o $^@
+
+colorspace_yuyv_mmx.obj: $(SRC)/image/x86_asm/colorspace_yuyv_mmx.asm
+	$(NASM) $(NASMFLAGS) -I$(SRC)/image/x86_asm/ $(SRC)/image/x86_asm/colorspace_yuyv_mmx.asm -o $^@
+
+gmc_mmx.obj: $(SRC)/image/x86_asm/gmc_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/gmc_mmx.asm -o $^@
+
+postprocessing_mmx.obj: $(SRC)/image/x86_asm/postprocessing_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/postprocessing_mmx.asm -o $^@
+
+qpel_mmx.obj: $(SRC)/image/x86_asm/qpel_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/qpel_mmx.asm -o $^@
+
+# Bitstream
+cbp_mmx.obj: $(SRC)/bitstream/x86_asm/cbp_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/bitstream/x86_asm/cbp_mmx.asm -o $^@
+
+# Quantisation (dequant paths used by decoder)
+quantize_h263_mmx.obj: $(SRC)/quant/x86_asm/quantize_h263_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/quant/x86_asm/quantize_h263_mmx.asm -o $^@
+
+quantize_mpeg_mmx.obj: $(SRC)/quant/x86_asm/quantize_mpeg_mmx.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/quant/x86_asm/quantize_mpeg_mmx.asm -o $^@
+
+quantize_mpeg_xmm.obj: $(SRC)/quant/x86_asm/quantize_mpeg_xmm.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/quant/x86_asm/quantize_mpeg_xmm.asm -o $^@
+
+quantize_h263_3dne.obj: $(SRC)/quant/x86_asm/quantize_h263_3dne.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/quant/x86_asm/quantize_h263_3dne.asm -o $^@
+
+# Remaining — 3DNow / 3DNow Extended / SSE2 / SSE3 / deinterlace
+# (never executed on PIII, but required to satisfy link-time references)
+interpolate8x8_3dn.obj: $(SRC)/image/x86_asm/interpolate8x8_3dn.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/interpolate8x8_3dn.asm -o $^@
+
+interpolate8x8_3dne.obj: $(SRC)/image/x86_asm/interpolate8x8_3dne.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/interpolate8x8_3dne.asm -o $^@
+
+mem_transfer_3dne.obj: $(SRC)/utils/x86_asm/mem_transfer_3dne.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/utils/x86_asm/mem_transfer_3dne.asm -o $^@
+
+sad_3dn.obj: $(SRC)/motion/x86_asm/sad_3dn.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/motion/x86_asm/sad_3dn.asm -o $^@
+
+sad_3dne.obj: $(SRC)/motion/x86_asm/sad_3dne.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/motion/x86_asm/sad_3dne.asm -o $^@
+
+idct_3dne.obj: $(SRC)/dct/x86_asm/idct_3dne.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/dct/x86_asm/idct_3dne.asm -o $^@
+
+sad_sse2.obj: $(SRC)/motion/x86_asm/sad_sse2.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/motion/x86_asm/sad_sse2.asm -o $^@
+
+cbp_sse2.obj: $(SRC)/bitstream/x86_asm/cbp_sse2.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/bitstream/x86_asm/cbp_sse2.asm -o $^@
+
+fdct_sse2_skal.obj: $(SRC)/dct/x86_asm/fdct_sse2_skal.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/dct/x86_asm/fdct_sse2_skal.asm -o $^@
+
+idct_sse2_dmitry.obj: $(SRC)/dct/x86_asm/idct_sse2_dmitry.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/dct/x86_asm/idct_sse2_dmitry.asm -o $^@
+
+postprocessing_sse2.obj: $(SRC)/image/x86_asm/postprocessing_sse2.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/postprocessing_sse2.asm -o $^@
+
+deintl_sse.obj: $(SRC)/image/x86_asm/deintl_sse.asm
+	$(NASM) $(NASMFLAGS) $(SRC)/image/x86_asm/deintl_sse.asm -o $^@
+
+# -----------------------------------------------------------------------
 # Clean
 # -----------------------------------------------------------------------
 
 clean: .SYMBOLIC
 	rm -f *.obj *.err xvidcore.lib
+	@echo Cleaned.

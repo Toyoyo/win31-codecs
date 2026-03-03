@@ -100,7 +100,7 @@ Command handlers:
 
 | Command | Action |
 |---|---|
-| `IPC_CMD_OPEN` | Calls `xvid_global(XVID_GBL_INIT)` once, then `xvid_decore(XVID_DEC_CREATE)`; stores handle in instance table; writes 1-based index back to `p->handle` |
+| `IPC_CMD_OPEN` | Calls `xvid_global(XVID_GBL_INIT)` once (with runtime CPU detection), then `xvid_decore(XVID_DEC_CREATE)`; stores handle in instance table; writes 1-based index back to `p->handle` |
 | `IPC_CMD_CLOSE` | Calls `xvid_decore(XVID_DEC_DESTROY)`; marks instance slot free |
 | `IPC_CMD_DECODE` | Locks src/dst `GMEM_SHARE` buffers, calls `xvid_decore(XVID_DEC_DECODE)` inside `__try/__except`; on exception destroys decoder so it can be recreated on the next keyframe |
 
@@ -141,7 +141,8 @@ ORed into the color-space value to let XviD handle the vertical flip.
 - Video for Windows 1.1e runtime
 
 ### Build
-- OpenWatcom C/C++ 2.0 (https://github.com/open-watcom/open-watcom-v2) — SDK headers are included with OpenWatcom; xvidcore-1.3.7 is bundled in this repository
+- OpenWatcom C/C++ 2.0 (http://www.openwatcom.org) — SDK headers are included with OpenWatcom; xvidcore-1.3.7 is bundled in this repository
+- NASM assembler — required to assemble the x86 SIMD sources in xvidcore
 
 ## Building
 
@@ -155,8 +156,14 @@ ORed into the color-space value to let XviD handle the vertical flip.
    ```
    wmake
    ```
-   This builds `xvidcore.lib` from the bundled `xvidcore-1.3.7/` source,
+   This assembles the xvidcore x86 SIMD sources with NASM, compiles and
+   archives `xvidcore.lib` from the bundled `xvidcore-1.3.7/` source,
    then produces `xvid16.dll` (16-bit codec) and `xvidhlp.exe` (32-bit helper).
+
+   xvidcore is built with full x86 SIMD support (MMX, MMXEXT, SSE2, 3DNow,
+   etc.). The active acceleration tier is selected at runtime via CPUID:
+   a Pentium III gets MMX + MMXEXT paths, a Pentium II gets MMX only,
+   older CPUs fall back to pure C. The same binary runs on all.
 
 ## Installation
 
@@ -192,7 +199,8 @@ MPEG-4 video in AVI containers can now be played with Windows Media Player.
 - **No palette output.** 8-bit paletted output is not implemented.
 - **Single-threaded cooperative.** Win32s is cooperative; each frame
   decode spin-waits on shared memory while yielding to the message
-  loop. A fast computer is recommended for smooth playback (At least PIII)
+  loop. A fast computer is recommended for smooth playback (Pentium III
+  or better for real-time; Pentium II will work but may drop frames).
 - **Memory.** XviD needs ~1 MB per open decoder instance plus frame
   buffers. Win32s memory is limited by available extended memory.
   (takes about 8MiB for a 640x360 video)

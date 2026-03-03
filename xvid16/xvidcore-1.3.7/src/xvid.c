@@ -82,6 +82,9 @@ unsigned int xvid_debug = 0; /* xvid debug mask */
 	static jmp_buf mark;
 
 	static void
+#if defined(__WATCOMC__)
+	__watcall    /* signal() handler must be __watcall even under -ecc */
+#endif
 	sigill_handler(int signal)
 	{
 	   longjmp(mark, 1);
