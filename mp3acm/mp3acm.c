@@ -38,8 +38,11 @@ BOOL WINAPI IsBadReadPtr(const void FAR* lp, UINT cb);
  * ----------------------------------------------------------------------- */
 typedef struct {
     mp3dec_t    dec;
-    WORD        nChannels;
-    DWORD       nSamplesPerSec;
+    WORD        nChannelsSrc;     /* source (decoded) channels */
+    WORD        nChannelsDst;     /* output channels */
+    DWORD       nSamplesPerSecSrc;/* source sample rate */
+    DWORD       nSamplesPerSecDst;/* output sample rate */
+    WORD        wBitsPerSample;   /* output: 8 or 16 */
     /* Output PCM buffer — kept on heap to avoid stack overflow in 16-bit callback */
     short       pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 } STREAM_STATE;
@@ -73,14 +76,15 @@ int CALLBACK WEP(int nExitType)
  * Fill WAVEFORMATEX for PCM output
  * ----------------------------------------------------------------------- */
 static void FillPcmFormat(LPWAVEFORMATEX pwfx, DWORD nSamplesPerSec,
-                           WORD nChannels)
+                           WORD nChannels, WORD wBitsPerSample)
 {
+    WORD bytesPerSample = wBitsPerSample / 8;
     pwfx->wFormatTag      = WAVE_FORMAT_PCM;
     pwfx->nChannels       = nChannels;
     pwfx->nSamplesPerSec  = nSamplesPerSec;
-    pwfx->wBitsPerSample  = 16;
-    pwfx->nBlockAlign     = (WORD)(nChannels * 2);
-    pwfx->nAvgBytesPerSec = nSamplesPerSec * nChannels * 2;
+    pwfx->wBitsPerSample  = wBitsPerSample;
+    pwfx->nBlockAlign     = nChannels * bytesPerSample;
+    pwfx->nAvgBytesPerSec = nSamplesPerSec * nChannels * bytesPerSample;
     pwfx->cbSize          = 0;
 }
 
@@ -160,7 +164,7 @@ static LRESULT acm_FormatTagDetails(LPACMFORMATTAGDETAILS paftd, DWORD fdwDetail
     } else {
         paftd->dwFormatTagIndex  = 1;
         paftd->cbFormatSize      = sizeof(WAVEFORMATEX);
-        paftd->cStandardFormats  = MP3ACM_NUM_FORMATS;
+        paftd->cStandardFormats  = MP3ACM_NUM_PCM_FORMATS;
         lstrcpy(paftd->szFormatTag, "PCM");
     }
     return MMSYSERR_NOERROR;
@@ -171,31 +175,44 @@ static LRESULT acm_FormatTagDetails(LPACMFORMATTAGDETAILS paftd, DWORD fdwDetail
  * ----------------------------------------------------------------------- */
 static LRESULT acm_FormatDetails(LPACMFORMATDETAILS pafd, DWORD fdwDetails)
 {
-    DWORD idx;
-    char buf[32];
+    DWORD idx, maxIdx, fmtIdx;
+    WORD bits;
+    char buf[48];
 
     if (!pafd || !pafd->pwfx) return ACMERR_NOTPOSSIBLE;
+
+    if (pafd->dwFormatTag == WAVE_FORMAT_MPEGLAYER3)
+        maxIdx = MP3ACM_NUM_FORMATS;
+    else if (pafd->dwFormatTag == WAVE_FORMAT_PCM)
+        maxIdx = MP3ACM_NUM_PCM_FORMATS;
+    else
+        return ACMERR_NOTPOSSIBLE;
 
     switch (fdwDetails & ACMFORMATDETAILS_QUERY_MASK) {
     case ACMFORMATDETAILS_QUERY_INDEX:
         idx = pafd->dwFormatIndex;
-        if (idx >= MP3ACM_NUM_FORMATS) return ACMERR_NOTPOSSIBLE;
-        if (pafd->dwFormatTag != WAVE_FORMAT_MPEGLAYER3 &&
-            pafd->dwFormatTag != WAVE_FORMAT_PCM)
-            return ACMERR_NOTPOSSIBLE;
+        if (idx >= maxIdx) return ACMERR_NOTPOSSIBLE;
         break;
     case ACMFORMATDETAILS_QUERY_FORMAT:
         /* Caller supplies format, we just validate and fill name */
-        if (pafd->dwFormatTag != WAVE_FORMAT_MPEGLAYER3 &&
-            pafd->dwFormatTag != WAVE_FORMAT_PCM)
-            return ACMERR_NOTPOSSIBLE;
-        /* Find matching index */
-        for (idx = 0; idx < MP3ACM_NUM_FORMATS; idx++) {
-            if (g_fmts[idx].rate  == pafd->pwfx->nSamplesPerSec &&
-                g_fmts[idx].chans == pafd->pwfx->nChannels)
-                break;
+        if (pafd->dwFormatTag == WAVE_FORMAT_PCM) {
+            WORD qbits = pafd->pwfx->wBitsPerSample;
+            if (qbits != 8 && qbits != 16) return ACMERR_NOTPOSSIBLE;
+            for (idx = 0; idx < MP3ACM_NUM_FORMATS; idx++) {
+                if (g_fmts[idx].rate  == pafd->pwfx->nSamplesPerSec &&
+                    g_fmts[idx].chans == pafd->pwfx->nChannels)
+                    break;
+            }
+            if (idx >= MP3ACM_NUM_FORMATS) return ACMERR_NOTPOSSIBLE;
+            if (qbits == 8) idx += MP3ACM_NUM_FORMATS;
+        } else {
+            for (idx = 0; idx < MP3ACM_NUM_FORMATS; idx++) {
+                if (g_fmts[idx].rate  == pafd->pwfx->nSamplesPerSec &&
+                    g_fmts[idx].chans == pafd->pwfx->nChannels)
+                    break;
+            }
+            if (idx >= MP3ACM_NUM_FORMATS) return ACMERR_NOTPOSSIBLE;
         }
-        if (idx >= MP3ACM_NUM_FORMATS) return ACMERR_NOTPOSSIBLE;
         break;
     default:
         return ACMERR_NOTPOSSIBLE;
@@ -203,12 +220,22 @@ static LRESULT acm_FormatDetails(LPACMFORMATDETAILS pafd, DWORD fdwDetails)
 
     pafd->fdwSupport = ACMDRIVERDETAILS_SUPPORTF_CODEC;
 
-    FillPcmFormat(pafd->pwfx, g_fmts[idx].rate, g_fmts[idx].chans);
+    /* MP3 tag: idx 0..5 maps to g_fmts[0..5], always 16-bit base
+     * PCM tag: idx 0..5 = 16-bit, idx 6..11 = 8-bit */
+    if (pafd->dwFormatTag == WAVE_FORMAT_MPEGLAYER3) {
+        fmtIdx = idx;
+        bits = 16;
+    } else {
+        fmtIdx = idx % MP3ACM_NUM_FORMATS;
+        bits = (idx < MP3ACM_NUM_FORMATS) ? 16 : 8;
+    }
+
+    FillPcmFormat(pafd->pwfx, g_fmts[fmtIdx].rate, g_fmts[fmtIdx].chans, bits);
     if (pafd->dwFormatTag == WAVE_FORMAT_MPEGLAYER3)
         pafd->pwfx->wFormatTag = WAVE_FORMAT_MPEGLAYER3;
 
-    wsprintf(buf, "%luHz %s", g_fmts[idx].rate,
-             g_fmts[idx].chans == 1 ? "Mono" : "Stereo");
+    wsprintf(buf, "%luHz %u-bit %s", g_fmts[fmtIdx].rate, (WORD)bits,
+             g_fmts[fmtIdx].chans == 1 ? "Mono" : "Stereo");
     lstrcpy(pafd->szFormat, buf);
 
     return MMSYSERR_NOERROR;
@@ -229,18 +256,42 @@ static LRESULT acm_FormatSuggest(LPACMDRVFORMATSUGGEST padfs)
     /* We only decode MP3 -> PCM */
     if (src->wFormatTag != WAVE_FORMAT_MPEGLAYER3) return ACMERR_NOTPOSSIBLE;
 
-    /* Suggest PCM matching source sample rate and channel count */
-    FillPcmFormat(dst, src->nSamplesPerSec, src->nChannels);
+    /* Start with defaults matching source; override from SYSTEM.INI config */
+    {
+        WORD suggestBits = 16;
+        WORD suggestChans = src->nChannels;
+        DWORD suggestRate = src->nSamplesPerSec;
 
-    /* Honor caller's constraints */
-    if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_WFORMATTAG)
-        if (dst->wFormatTag != WAVE_FORMAT_PCM) return ACMERR_NOTPOSSIBLE;
-    if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_NCHANNELS)
-        FillPcmFormat(dst, src->nSamplesPerSec, dst->nChannels);
-    if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_NSAMPLESPERSEC)
-        FillPcmFormat(dst, dst->nSamplesPerSec, dst->nChannels);
-    if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_WBITSPERSAMPLE)
-        if (dst->wBitsPerSample != 16) return ACMERR_NOTPOSSIBLE;
+        /* Read user configuration from [mp3acm16.acm] in SYSTEM.INI */
+        {
+            UINT cfgRate = GetPrivateProfileInt("mp3acm16.acm", "frequency", 0, "SYSTEM.INI");
+            UINT cfgCh   = GetPrivateProfileInt("mp3acm16.acm", "channels", 0, "SYSTEM.INI");
+            UINT cfgBits = GetPrivateProfileInt("mp3acm16.acm", "bitdepth", 0, "SYSTEM.INI");
+
+            if (cfgRate > 0) suggestRate  = (DWORD)cfgRate;
+            if (cfgCh > 0)   suggestChans = (WORD)cfgCh;
+            if (cfgBits == 8 || cfgBits == 16) suggestBits = (WORD)cfgBits;
+        }
+
+        /* Caller constraints override config */
+        if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_WFORMATTAG)
+            if (dst->wFormatTag != WAVE_FORMAT_PCM) return ACMERR_NOTPOSSIBLE;
+        if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_NCHANNELS)
+            suggestChans = dst->nChannels;
+        if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_NSAMPLESPERSEC)
+            suggestRate = dst->nSamplesPerSec;
+        if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_WBITSPERSAMPLE) {
+            if (dst->wBitsPerSample != 8 && dst->wBitsPerSample != 16)
+                return ACMERR_NOTPOSSIBLE;
+            suggestBits = dst->wBitsPerSample;
+        }
+
+        /* Don't upsample */
+        if (suggestRate > src->nSamplesPerSec)
+            suggestRate = src->nSamplesPerSec;
+
+        FillPcmFormat(dst, suggestRate, suggestChans, suggestBits);
+    }
 
     return MMSYSERR_NOERROR;
 }
@@ -258,12 +309,17 @@ static LRESULT acm_StreamOpen(LPACMDRVSTREAMINSTANCE padsi)
     src = padsi->pwfxSrc;
     dst = padsi->pwfxDst;
 
-    /* Validate: MP3 -> PCM 16-bit only */
+    /* Validate: MP3 -> PCM 8-bit or 16-bit */
     if (src->wFormatTag != WAVE_FORMAT_MPEGLAYER3) return ACMERR_NOTPOSSIBLE;
     if (dst->wFormatTag != WAVE_FORMAT_PCM)  return ACMERR_NOTPOSSIBLE;
-    if (dst->wBitsPerSample != 16)           return ACMERR_NOTPOSSIBLE;
+    if (dst->wBitsPerSample != 8 && dst->wBitsPerSample != 16)
+        return ACMERR_NOTPOSSIBLE;
     if (src->nChannels < 1 || src->nChannels > 2) return ACMERR_NOTPOSSIBLE;
-    if (src->nSamplesPerSec == 0)             return ACMERR_NOTPOSSIBLE;
+    if (dst->nChannels < 1 || dst->nChannels > 2) return ACMERR_NOTPOSSIBLE;
+    if (src->nSamplesPerSec == 0 || dst->nSamplesPerSec == 0)
+        return ACMERR_NOTPOSSIBLE;
+    /* Only allow downsampling, not upsampling */
+    if (dst->nSamplesPerSec > src->nSamplesPerSec) return ACMERR_NOTPOSSIBLE;
 
     /* Query-only: just validate, don't allocate */
     if (padsi->fdwOpen & ACM_STREAMOPENF_QUERY)
@@ -277,8 +333,11 @@ static LRESULT acm_StreamOpen(LPACMDRVSTREAMINSTANCE padsi)
     if (!pState) { GlobalFree(hMem); return MMSYSERR_NOMEM; }
 
     mp3dec_init(&pState->dec);
-    pState->nChannels     = src->nChannels;
-    pState->nSamplesPerSec= src->nSamplesPerSec;
+    pState->nChannelsSrc      = src->nChannels;
+    pState->nChannelsDst      = dst->nChannels;
+    pState->nSamplesPerSecSrc = src->nSamplesPerSec;
+    pState->nSamplesPerSecDst = dst->nSamplesPerSec;
+    pState->wBitsPerSample    = dst->wBitsPerSample;
 
     /* Store HANDLE in dwDriver (16-bit HANDLE fits in DWORD) */
     padsi->dwDriver = (DWORD)(WORD)hMem;
@@ -309,30 +368,38 @@ static LRESULT acm_StreamSize(LPACMDRVSTREAMINSTANCE padsi,
 {
     LPWAVEFORMATEX dst;
     DWORD samplesPerFrame;
+    DWORD bytesPerSample;
 
     if (!padsi || !padss) return ACMERR_NOTPOSSIBLE;
     dst = padsi->pwfxDst;
+    bytesPerSample = (DWORD)(dst->wBitsPerSample / 8);
     /* MPEG1 = 1152 samples/frame, MPEG2 (<=24kHz) = 576 */
     samplesPerFrame = (padsi->pwfxSrc->nSamplesPerSec <= 24000) ? 576 : 1152;
 
+    /* Account for sample rate conversion in output size */
+    {
+        DWORD srcRate = padsi->pwfxSrc->nSamplesPerSec;
+        DWORD dstRate = dst->nSamplesPerSec;
+        DWORD outSamplesPerFrame = samplesPerFrame;
+        if (dstRate < srcRate && srcRate > 0)
+            outSamplesPerFrame = (samplesPerFrame * dstRate + srcRate - 1) / srcRate;
+
     if ((padss->fdwSize & ACM_STREAMSIZEF_QUERYMASK) ==
          ACM_STREAMSIZEF_SOURCE) {
-        /* How many dst bytes for cbSrcLength src bytes?
-         * Each MP3 frame is nBlockAlign bytes; produces 1152 * nChannels * 2 bytes PCM */
         DWORD frameSize = padsi->pwfxSrc->nBlockAlign;
-        DWORD pcmFrame  = samplesPerFrame * dst->nChannels * 2;
+        DWORD pcmFrame  = outSamplesPerFrame * dst->nChannels * bytesPerSample;
         if (frameSize == 0) frameSize = 384;
         padss->cbDstLength = (padss->cbSrcLength / frameSize) * pcmFrame;
         if (padss->cbDstLength == 0) padss->cbDstLength = pcmFrame;
     } else {
-        /* How many src bytes needed for cbDstLength dst bytes? */
-        DWORD pcmFrame  = samplesPerFrame * dst->nChannels * 2;
+        DWORD pcmFrame  = outSamplesPerFrame * dst->nChannels * bytesPerSample;
         DWORD frameSize = padsi->pwfxSrc->nBlockAlign;
         if (pcmFrame == 0) return ACMERR_NOTPOSSIBLE;
         if (frameSize == 0) frameSize = 384;
         padss->cbSrcLength = (padss->cbDstLength / pcmFrame) * frameSize;
         if (padss->cbSrcLength == 0) padss->cbSrcLength = frameSize;
     }
+    } /* end srcRate/dstRate block */
     return MMSYSERR_NOERROR;
 }
 
@@ -434,9 +501,15 @@ static LRESULT acm_StreamConvert(LPACMDRVSTREAMINSTANCE padsi,
     dstLeft = pash->cbDstLength;
     srcUsed = 0;
     dstUsed = 0;
-    /* MPEG1=1152 samples/frame, MPEG2(<=24kHz)=576 */
-    maxPcm  = (DWORD)(pState->nSamplesPerSec <= 24000 ? 576 : 1152)
-              * (DWORD)pState->nChannels * 2;
+    /* Max output bytes per frame after all conversions */
+    {
+        DWORD srcSpf = (DWORD)(pState->nSamplesPerSecSrc <= 24000 ? 576 : 1152);
+        DWORD outSpf = srcSpf;
+        if (pState->nSamplesPerSecDst < pState->nSamplesPerSecSrc)
+            outSpf = (srcSpf * pState->nSamplesPerSecDst + pState->nSamplesPerSecSrc - 1)
+                     / pState->nSamplesPerSecSrc;
+        maxPcm = outSpf * (DWORD)pState->nChannelsDst * (DWORD)(pState->wBitsPerSample / 8);
+    }
     if (maxPcm == 0) { GlobalUnlock(hMem); return ACMERR_NOTPOSSIBLE; }
 
     {
@@ -478,17 +551,65 @@ static LRESULT acm_StreamConvert(LPACMDRVSTREAMINSTANCE padsi,
             srcUsed += frameSize;
 
             if (samples > 0) {
-                pcmBytes = (DWORD)samples * (DWORD)info.channels * sizeof(short);
-                if (pcmBytes > dstLeft) pcmBytes = dstLeft;
-                hmemcpy(pDst, pState->pcm, pcmBytes);
+                short FAR *pPcm = pState->pcm;
+                long nSamp = (long)samples;
+                WORD srcCh = info.channels;
+                WORD dstCh = pState->nChannelsDst;
+                DWORD srcRate = pState->nSamplesPerSecSrc;
+                DWORD dstRate = pState->nSamplesPerSecDst;
+                long j;
+
+                /* Stereo to mono: average L+R in place */
+                if (srcCh == 2 && dstCh == 1) {
+                    for (j = 0; j < nSamp; j++) {
+                        long l = pPcm[j * 2];
+                        long r = pPcm[j * 2 + 1];
+                        pPcm[j] = (short)((l + r) / 2);
+                    }
+                    srcCh = 1;
+                }
+
+                /* Downsample: linear interpolation in place */
+                if (dstRate < srcRate) {
+                    long outSamp = (nSamp * (long)dstRate) / (long)srcRate;
+                    long c;
+                    for (j = 0; j < outSamp; j++) {
+                        long pos = j * (long)srcRate;
+                        long idx = pos / (long)dstRate;
+                        long frac = pos % (long)dstRate;
+                        for (c = 0; c < (long)srcCh; c++) {
+                            if (idx + 1 < nSamp) {
+                                long a = pPcm[idx * srcCh + c];
+                                long b = pPcm[(idx + 1) * srcCh + c];
+                                pPcm[j * srcCh + c] = (short)(a + (b - a) * frac / (long)dstRate);
+                            } else {
+                                pPcm[j * srcCh + c] = pPcm[idx * srcCh + c];
+                            }
+                        }
+                    }
+                    nSamp = outSamp;
+                }
+
+                /* Write to output: 8-bit or 16-bit */
+                if (pState->wBitsPerSample == 8) {
+                    DWORD totalSamples = (DWORD)nSamp * (DWORD)srcCh;
+                    pcmBytes = totalSamples;
+                    if (pcmBytes > dstLeft) pcmBytes = dstLeft;
+                    for (j = 0; j < (long)pcmBytes; j++)
+                        pDst[j] = (BYTE)((pPcm[j] >> 8) + 128);
+                } else {
+                    pcmBytes = (DWORD)nSamp * (DWORD)srcCh * sizeof(short);
+                    if (pcmBytes > dstLeft) pcmBytes = dstLeft;
+                    hmemcpy(pDst, pPcm, pcmBytes);
+                }
                 pDst    += pcmBytes;
                 dstLeft -= pcmBytes;
                 dstUsed += pcmBytes;
             } else {
-                /* Decode failed — output silence */
+                /* Decode failed — output silence (0x80 for 8-bit unsigned, 0 for 16-bit signed) */
                 pcmBytes = maxPcm;
                 if (pcmBytes > dstLeft) pcmBytes = dstLeft;
-                _fmemset(pDst, 0, (WORD)pcmBytes);
+                _fmemset(pDst, (pState->wBitsPerSample == 8) ? 0x80 : 0, (WORD)pcmBytes);
                 pDst    += pcmBytes;
                 dstLeft -= pcmBytes;
                 dstUsed += pcmBytes;

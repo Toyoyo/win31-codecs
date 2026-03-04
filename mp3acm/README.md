@@ -4,12 +4,12 @@ A 16-bit Audio Compression Manager (ACM) driver that enables Windows 3.1 to deco
 
 ## Overview
 
-MP3ACM is a native 16-bit Windows 3.1 driver that implements the ACM codec interface. It uses the [minimp3](https://github.com/lieff/minimp3) library (CC0 1.0 Universal) for MP3 decoding and outputs standard 16-bit PCM audio.
+MP3ACM is a native 16-bit Windows 3.1 driver that implements the ACM codec interface. It uses the [minimp3](https://github.com/lieff/minimp3) library (CC0 1.0 Universal) for MP3 decoding and outputs PCM audio.
 
 ### Supported Formats
 
 - **Input**: MPEG-1 Audio Layer 3 (MP3)
-- **Output**: 16-bit PCM
+- **Output**: 8-bit unsigned or 16-bit signed PCM
 
 ### Supported Sample Rates and Channels
 
@@ -81,10 +81,23 @@ Edit your `SYSTEM.INI` file (located in the Windows directory) and add the follo
 
 ```ini
 [drivers]
-msacm.mp3=mp3acm16.acm
+msacm.mp3=mp3acm16.dll
 ```
 
-### Step 3: Restart Windows
+### Step 3 (Optional): Configure Output Format
+
+For sound cards that don't support high sample rates or 16-bit audio (e.g. Sound Blaster 2.0), add a configuration section to `SYSTEM.INI`:
+
+```ini
+[mp3acm16.acm]
+frequency=22050
+bitdepth=8
+channels=1
+```
+
+All three settings are optional. When set, the codec will downsample and convert the output accordingly. This avoids relying on MSACM's PCM converter for multi-step format conversion, which Windows 3.1 does not support in a single pipeline.
+
+### Step 4: Restart Windows
 
 Restart Windows 3.1 for the codec to be registered with the system.
 
@@ -104,6 +117,8 @@ After restarting, the codec should be available to any ACM-aware application. Yo
 
 - Maximum decoder state size is 8KB per stream
 - The codec operates as a converter (MP3 -> PCM) with no filter support
+- Supports built-in downsampling (linear interpolation), stereo-to-mono downmix, and 16-to-8-bit conversion
+- Output format can be configured via `[mp3acm16.acm]` section in `SYSTEM.INI`
 
 ## Files
 
@@ -120,7 +135,7 @@ After restarting, the codec should be available to any ACM-aware application. Yo
 ## Credits
 
 - **minimp3**: By lieff (https://github.com/lieff/minimp3) - CC0 1.0 Universal
-- Built with [OpenWatcom](https://github.com/open-watcom/open-watcom-v2)
+- Built with [OpenWatcom](https://www.openwatcom.org/)
 
 ## License
 

@@ -265,6 +265,10 @@ typedef ACMDRVFORMATSUGGEST FAR *LPACMDRVFORMATSUGGEST;
 /* Total number of standard formats we enumerate */
 #define MP2ACM_NUM_FORMATS  (MP2ACM_NUM_RATES * MP2ACM_NUM_CHANNELS)
 
+/* PCM output: 8-bit and 16-bit variants of each rate/channel combo */
+#define MP2ACM_NUM_BITS     2   /* 16, 8 */
+#define MP2ACM_NUM_PCM_FORMATS (MP2ACM_NUM_FORMATS * MP2ACM_NUM_BITS)
+
 /* Maximum per-stream decoder state size (mp3dec_t ~6.7KB) */
 #define MP2ACM_INST_SIZE    8192
 
