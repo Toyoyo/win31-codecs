@@ -81,7 +81,7 @@ Edit your `SYSTEM.INI` file (located in the Windows directory) and add the follo
 
 ```ini
 [drivers]
-msacm.mp3=mp3acm16.dll
+msacm.mp3=mp3acm16.acm
 ```
 
 ### Step 3: Restart Windows

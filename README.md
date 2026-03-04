@@ -39,7 +39,7 @@ A 16-bit ACM driver for decoding MP3 audio, using the [minimp3](https://github.c
 **Installation** — copy `mp3acm16.acm` to `C:\WINDOWS\SYSTEM\` as `mp3acm16.dll` and add to `SYSTEM.INI`:
 ```ini
 [drivers]
-msacm.mp3=mp3acm16.dll
+msacm.mp3=mp3acm16.acm
 ```
 
 Requires a patched `MSACM.DRV` (see `patched/`).
