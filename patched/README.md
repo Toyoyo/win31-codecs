@@ -44,7 +44,7 @@ The `WAVE_FORMAT_DEVELOPMENT` (`0x2000`) check and the `ja` fallback for tags `>
 
 ## MCIAVI.DRV
 
-**Patch size**: 4 changes across the file
+**Patch size**: 6 changes across the file
 
 ### Change 1 — waveOut buffer count (offset `0x60C4`, 1 byte)
 
@@ -73,8 +73,72 @@ The trampoline checks `wFormatTag`: if `0x0050` (MPEG/MP2) or `0x0055` (MP3), it
 | Original | `0xD9` |
 | Patched  | `0x01` |
 
-Fixes a 7–8 second video freeze at the start of playback.
+Fixes a 7–8 second video freeze at the start of playback. The byte is the displacement of a `JMP SHORT` instruction that spun in a tight wait loop; changing it to `0x01` makes the jump fall through instead.
 
 ### Change 4 — Relocation table shift (offset `0xA711`+)
 
 The many byte differences from `0xA711` onward are not new code — they are the NE relocation records shifted 32 bytes later to make room for the trampoline appended to segment 1. The segment size/alloc fields in the NE header were also updated (offsets `0xC2`–`0xC7`: segment size changed from `0xA0F6` to `0xA116`).
+
+### Change 5 — Stale index count fix (offset `0xC301`, 9 bytes)
+
+| | Value |
+|---|---|
+| Original | `66 C7 84 0A 09 00 00 00 00` |
+| Patched  | `89 84 0A 09 89 84 0E 09 90` |
+
+**Problem:** The device-instance struct holds an AVI index (`idx1`) buffer at offset `0x90A`/`0x90C` (far pointer) and the entry count at `0x90E`/`0x910` (32-bit). The close path freed the buffer and zeroed `0x90A`, but never zeroed `0x90E`. If a file was reopened (e.g. same filename re-encoded over SMB) and the new file had a smaller or absent `idx1`, the stale count caused index-processing loops to run with a null or wrong pointer, resulting in a GPF or very long freeze.
+
+**Original instruction:** `MOV DWORD [SI+090Ah], 0` — zeros the pointer but leaves the count.
+
+**Patched instructions:**
+```asm
+MOV [SI+090Ah], AX   ; zero the pointer low word  (AX=0 after GlobalFree)
+MOV [SI+090Eh], AX   ; zero the count low word
+NOP
+```
+
+This also zeroes `0x90E` (the low word of the 32-bit count; `0x910` was already zero in practice), preventing the stale count from persisting across close/reopen.
+
+### Change 6 — Yield injection into idx1 processing loop (multiple offsets)
+
+Fixes a cooperative-multitasking freeze of several seconds that occurs when opening a large AVI file, caused by a tight index-processing loop running without yielding to other Windows tasks.
+
+**Segment 3 size fields (NE header offsets `0xD2` and `0xD6`, 2 bytes each):**
+
+| | Value |
+|---|---|
+| Original | `0x260E` |
+| Patched  | `0x2617` |
+
+Segment 3 is extended by 9 bytes to accommodate a new stub.
+
+**New stub at Seg3+0x260E (file offset `0xD60E`, 9 bytes):**
+
+```asm
+9A FF FF 00 00   CALL FAR Yield        ; KERNEL.Yield — patched by NE loader
+8B 4E FA         MOV CX, [BP-0x6]     ; restore CX (Yield may clobber it)
+C3               RETN
+```
+
+`0xFFFF` is the NE relocation chain end-marker; the loader replaces it with the actual `KERNEL.Yield` segment:offset.
+
+**Seg3 relocation table (file offset `0xD617`, previously `0xD60E`):**
+
+The table is shifted 9 bytes later to follow the new stub. The count field is incremented from 37 to 38, and a new entry is appended:
+
+| Field | Value |
+|---|---|
+| `src_type` | `3` (offset fixup) |
+| `fix_type` | `1` (import by ordinal) |
+| `src_off`  | `0x260F` (CALLF address bytes within Seg3) |
+| `module`   | `2` (KERNEL) |
+| `ordinal`  | `29` (Yield) |
+
+**Call site at Seg3+0x1DDE (file offset `0xCDDE`, 3 bytes):**
+
+| | Value |
+|---|---|
+| Original | `8B 4E FA` (`MOV CX, [BP-0x6]`) |
+| Patched  | `E8 2D 08` (`CALL NEAR 0x260E`) |
+
+The replaced `MOV CX` is preserved inside the stub (executed after `Yield` returns). On every loop iteration the driver now calls `KERNEL.Yield`, allowing Windows 3.1's cooperative scheduler to run other tasks while the index is being built.
