@@ -86,7 +86,7 @@ The many byte differences from `0xA711` onward are not new code — they are the
 | Original | `66 C7 84 0A 09 00 00 00 00` |
 | Patched  | `89 84 0A 09 89 84 0E 09 90` |
 
-**Problem:** The device-instance struct holds an AVI index (`idx1`) buffer at offset `0x90A`/`0x90C` (far pointer) and the entry count at `0x90E`/`0x910` (32-bit). The close path freed the buffer and zeroed `0x90A`, but never zeroed `0x90E`. If a file was reopened (e.g. same filename re-encoded over SMB) and the new file had a smaller or absent `idx1`, the stale count caused index-processing loops to run with a null or wrong pointer, resulting in a GPF or very long freeze.
+**Problem:** The device-instance struct holds an AVI index (`idx1`) buffer at offset `0x90A`/`0x90C` (far pointer) and the entry count at `0x90E`/`0x910` (32-bit). The close path freed the buffer and zeroed `0x90A`, but never zeroed `0x90E`. If a file was reopened (e.g. same filename re-encoded) and the new file had a smaller or absent `idx1`, the stale count caused index-processing loops to run with a null or wrong pointer, resulting in a GPF or very long freeze.
 
 **Original instruction:** `MOV DWORD [SI+090Ah], 0` — zeros the pointer but leaves the count.
 
@@ -99,40 +99,65 @@ NOP
 
 This also zeroes `0x90E` (the low word of the 32-bit count; `0x910` was already zero in practice), preventing the stale count from persisting across close/reopen.
 
-### Change 6 — Yield injection into idx1 processing loop (multiple offsets)
+### Change 6 — Message pump injection into idx1 processing loop (multiple offsets)
 
-Fixes a cooperative-multitasking freeze of several seconds that occurs when opening a large AVI file, caused by a tight index-processing loop running without yielding to other Windows tasks.
+Fixes a cooperative-multitasking freeze of several seconds that occurs when opening a large AVI file. The idx1 index-processing loop runs with no message dispatch, causing the entire system — including the Media Player window — to appear frozen.
 
 **Segment 3 size fields (NE header offsets `0xD2` and `0xD6`, 2 bytes each):**
 
 | | Value |
 |---|---|
 | Original | `0x260E` |
-| Patched  | `0x2617` |
+| Patched  | `0x2647` |
 
-Segment 3 is extended by 9 bytes to accommodate a new stub.
+Segment 3 is extended by 57 bytes to accommodate the new stub.
 
-**New stub at Seg3+0x260E (file offset `0xD60E`, 9 bytes):**
+**New stub at Seg3+0x260E (file offset `0xD60E`, 57 bytes):**
 
 ```asm
-9A FF FF 00 00   CALL FAR Yield        ; KERNEL.Yield — patched by NE loader
-8B 4E FA         MOV CX, [BP-0x6]     ; restore CX (Yield may clobber it)
-C3               RETN
+        PUSH BP
+        MOV  BP, SP
+        SUB  SP, 18         ; allocate MSG struct on stack (18 bytes)
+loop:
+        PUSH SS             ; lpMsg far-pointer: segment
+        LEA  AX, [BP-18]   ; lpMsg far-pointer: offset
+        PUSH AX
+        PUSH 0              ; hwnd    = NULL  (all messages)
+        PUSH 0              ; wMsgFilterMin = 0
+        PUSH 0              ; wMsgFilterMax = 0
+        PUSH 1              ; wRemoveMsg   = PM_REMOVE
+        CALL FAR PeekMessage
+        OR   AX, AX
+        JZ   done           ; no more messages — return to loop
+        PUSH SS
+        LEA  AX, [BP-18]
+        PUSH AX
+        CALL FAR TranslateMessage
+        PUSH SS
+        LEA  AX, [BP-18]
+        PUSH AX
+        CALL FAR DispatchMessage
+        JMP  loop
+done:
+        MOV  SP, BP
+        POP  BP
+        MOV  CX, [BP-0x6]  ; restore CX (displaced from call site)
+        RETN
 ```
 
-`0xFFFF` is the NE relocation chain end-marker; the loader replaces it with the actual `KERNEL.Yield` segment:offset.
+`PeekMessage` / `TranslateMessage` / `DispatchMessage` addresses are `0xFFFF` placeholders patched by the NE loader. PASCAL calling convention: callees clean their own arguments off the stack.
 
-**Seg3 relocation table (file offset `0xD617`, previously `0xD60E`):**
+On every index loop iteration, the stub drains the calling task's message queue, keeping the Media Player window (and the rest of the system) responsive during what could otherwise be a multi-second freeze.
 
-The table is shifted 9 bytes later to follow the new stub. The count field is incremented from 37 to 38, and a new entry is appended:
+**Seg3 relocation table (file offset `0xD647`, previously `0xD60E`):**
 
-| Field | Value |
-|---|---|
-| `src_type` | `3` (offset fixup) |
-| `fix_type` | `1` (import by ordinal) |
-| `src_off`  | `0x260F` (CALLF address bytes within Seg3) |
-| `module`   | `2` (KERNEL) |
-| `ordinal`  | `29` (Yield) |
+The table is shifted 57 bytes later to follow the new stub. The count field is updated from 37 to 40, and three new entries are appended:
+
+| # | `src_off` | `module` | `ordinal` | Function |
+|---|---|---|---|---|
+| 38 | `0x2622` | `3` (USER) | `109` | `PeekMessage` |
+| 39 | `0x2630` | `3` (USER) | `113` | `TranslateMessage` |
+| 40 | `0x263A` | `3` (USER) | `114` | `DispatchMessage` |
 
 **Call site at Seg3+0x1DDE (file offset `0xCDDE`, 3 bytes):**
 
@@ -141,4 +166,4 @@ The table is shifted 9 bytes later to follow the new stub. The count field is in
 | Original | `8B 4E FA` (`MOV CX, [BP-0x6]`) |
 | Patched  | `E8 2D 08` (`CALL NEAR 0x260E`) |
 
-The replaced `MOV CX` is preserved inside the stub (executed after `Yield` returns). On every loop iteration the driver now calls `KERNEL.Yield`, allowing Windows 3.1's cooperative scheduler to run other tasks while the index is being built.
+The displaced `MOV CX` is preserved inside the stub (executed after the pump loop returns). The 3-byte call site and 57-byte stub together add no branch overhead to the common case where the message queue is empty — `PeekMessage` returns immediately with `AX=0`.
