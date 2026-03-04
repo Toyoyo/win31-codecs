@@ -529,7 +529,7 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
     g_dwSrcBufSize = 256UL * 1024UL;
     g_dwDstBufSize = dibSize;
     g_hSrcBuf = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE, g_dwSrcBufSize);
-    g_hDstBuf = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE, g_dwDstBufSize);
+    g_hDstBuf = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE | GMEM_ZEROINIT, g_dwDstBufSize);
     if (g_hSrcBuf) g_lpSrcBuf = GlobalLock(g_hSrcBuf);
     if (g_hDstBuf) g_lpDstBuf = GlobalLock(g_hDstBuf);
 
