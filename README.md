@@ -105,7 +105,7 @@ See `patched/README.md` for full patch details.
 
 All components are built with [OpenWatcom C/C++](https://github.com/open-watcom/open-watcom-v2). Set the `WATCOM` environment variable and run `make` (or `wmake`) in each subdirectory:
 
-NASM is required for building the libxvidcore library used by xvid16
+NASM is required to build the libxvidcore library used by xvid16
 
 ```bash
 export WATCOM=/path/to/openwatcom
