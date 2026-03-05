@@ -36,7 +36,7 @@ A 16-bit ACM driver for decoding MP3 audio, using the [minimp3](https://github.c
 
 **Supported sample rates**: 16000, 22050, 24000, 32000, 44100, 48000 Hz (mono and stereo)
 
-**Installation** — copy `mp3acm16.acm` to `C:\WINDOWS\SYSTEM\` as `mp3acm16.dll` and add to `SYSTEM.INI`:
+**Installation** — copy `mp3acm16.acm` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
 ```ini
 [drivers]
 msacm.mp3=mp3acm16.acm

@@ -73,7 +73,7 @@ make clean
 
 ### Step 1: Copy the Codec
 
-Copy `mp3acm16.acm` to your Windows 3.1 system directory (typically `C:\WINDOWS\SYSTEM`), renaming it to `mp3acm16.dll`.
+Copy `mp3acm16.acm` to your Windows 3.1 system directory (typically `C:\WINDOWS\SYSTEM`)
 
 ### Step 2: Register the Codec
 
@@ -81,7 +81,7 @@ Edit your `SYSTEM.INI` file (located in the Windows directory) and add the follo
 
 ```ini
 [drivers]
-msacm.mp3=mp3acm16.dll
+msacm.mp3=mp3acm16.acm
 ```
 
 ### Step 3 (Optional): Configure Output Format

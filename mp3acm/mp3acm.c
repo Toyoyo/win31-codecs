@@ -6,7 +6,7 @@
  *
  * Install in SYSTEM.INI:
  *   [drivers]
- *   msacm.mp3=mp3acm16.dll
+ *   msacm.mp3=mp3acm16.acm
  */
 
 #ifndef STRICT

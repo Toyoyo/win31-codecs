@@ -6,7 +6,7 @@
  *
  * Installation (SYSTEM.INI):
  *   [drivers]
- *   msacm.mp2=mp2acm16.dll
+ *   msacm.mp2=mp2acm16.acm
  */
 
 #ifndef MP2ACM_H
