@@ -33,6 +33,11 @@ BOOL WINAPI IsBadReadPtr(const void FAR* lp, UINT cb);
  * Globals
  * ----------------------------------------------------------------------- */
 
+/* Cached SYSTEM.INI config (read once at DRV_LOAD) */
+static DWORD  g_cfgRate = 0;
+static WORD   g_cfgChans = 0;
+static WORD   g_cfgBits = 0;
+
 /* -----------------------------------------------------------------------
  * Per-stream state, allocated via GlobalAlloc per STREAM_OPEN
  * ----------------------------------------------------------------------- */
@@ -262,16 +267,10 @@ static LRESULT acm_FormatSuggest(LPACMDRVFORMATSUGGEST padfs)
         WORD suggestChans = src->nChannels;
         DWORD suggestRate = src->nSamplesPerSec;
 
-        /* Read user configuration from [mp3acm16.acm] in SYSTEM.INI */
-        {
-            UINT cfgRate = GetPrivateProfileInt("mp3acm16.acm", "frequency", 0, "SYSTEM.INI");
-            UINT cfgCh   = GetPrivateProfileInt("mp3acm16.acm", "channels", 0, "SYSTEM.INI");
-            UINT cfgBits = GetPrivateProfileInt("mp3acm16.acm", "bitdepth", 0, "SYSTEM.INI");
-
-            if (cfgRate > 0) suggestRate  = (DWORD)cfgRate;
-            if (cfgCh > 0)   suggestChans = (WORD)cfgCh;
-            if (cfgBits == 8 || cfgBits == 16) suggestBits = (WORD)cfgBits;
-        }
+        /* Apply cached SYSTEM.INI config (read once at DRV_LOAD) */
+        if (g_cfgRate > 0) suggestRate  = g_cfgRate;
+        if (g_cfgChans > 0) suggestChans = g_cfgChans;
+        if (g_cfgBits == 8 || g_cfgBits == 16) suggestBits = g_cfgBits;
 
         /* Caller constraints override config */
         if (padfs->fdwSuggest & ACM_FORMATSUGGESTF_WFORMATTAG)
@@ -638,6 +637,14 @@ LRESULT CALLBACK _export DriverProc(DWORD dwDriverId, HANDLE hDriver,
 
     switch (wMessage) {
     case DRV_LOAD:
+        {
+            UINT r = GetPrivateProfileInt("mp3acm16.acm", "frequency", 0, "SYSTEM.INI");
+            UINT c = GetPrivateProfileInt("mp3acm16.acm", "channels", 0, "SYSTEM.INI");
+            UINT b = GetPrivateProfileInt("mp3acm16.acm", "bitdepth", 0, "SYSTEM.INI");
+            if (r > 0) g_cfgRate  = (DWORD)r;
+            if (c > 0) g_cfgChans = (WORD)c;
+            if (b == 8 || b == 16) g_cfgBits = (WORD)b;
+        }
         return 1L;
     case DRV_FREE:
     case DRV_ENABLE:
