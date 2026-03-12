@@ -15,7 +15,7 @@ Built with OpenWatcom C and the [minimp3](https://github.com/lieff/minimp3) deco
 
 - Windows 3.1 or 3.11
 - A 387-compatible FPU (486DX, Pentium, or any x87-equipped CPU)
-- A WDM/MCI-compatible sound card with a Windows 3.1 driver
+- A MCI-compatible sound card with a Windows 3.1 driver
 
 ## Installation
 
