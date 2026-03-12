@@ -889,7 +889,8 @@ void CALLBACK _export BackgroundTask(DWORD dwInst)
     }
 
     pS->wCmd = CMD_NONE;
-    pS->dwBaseSamples = GetPositionSamples(pS);
+    pS->dwBaseSamples    = GetPositionSamples(pS);
+    pS->dwPlayedSamples  = 0;
     pS->hWaveOut    = NULL;
     pS->nBufsQueued = 0;
     pS->bMode       = MP_STOPPED;
@@ -953,9 +954,6 @@ static BOOL StopPlayback(LPINSTANCE pS)
         return TRUE;
     }
 
-    /* Bump generation so orphaned task knows to exit without touching pS */
-    pS->wGeneration++;
-
     /* Signal background task to stop */
     pS->wCmd = CMD_STOP;
 
@@ -970,6 +968,7 @@ static BOOL StopPlayback(LPINSTANCE pS)
         /* Task is stuck — caller must NOT free this instance */
         return FALSE;
     }
+    pS->bMode = MP_STOPPED;
     return TRUE;
 }
 
@@ -1088,15 +1087,23 @@ static DWORD mci_Stop(WORD wDevID)
     LPINSTANCE pS = LockInstance(wDevID);
     if (!pS) return MCIERR_DRIVER_INTERNAL;
 
-    if (pS->bMciNotify && pS->hwndMciCb) {
-        mciDriverNotify(pS->hwndMciCb, wDevID, MCI_NOTIFY_ABORTED);
+    {
+        BOOL hadNotify = pS->bMciNotify;
+        HWND hwndCb   = pS->hwndMciCb;
         pS->bMciNotify = FALSE;
+        pS->hwndMciCb  = NULL;
+
+        StopPlayback(pS);
+        UnlockInstance(wDevID);
+
+        /* Send ABORTED after stop completes — Media Player needs this
+         * to know playback was interrupted and update its UI. Sent after
+         * UnlockInstance to avoid reentrancy during StopPlayback. */
+        if (hadNotify && hwndCb)
+            mciDriverNotify(hwndCb, wDevID, MCI_NOTIFY_ABORTED);
+
+        return 0;
     }
-
-    StopPlayback(pS);
-
-    UnlockInstance(wDevID);
-    return 0;
 }
 
 static DWORD mci_Pause(WORD wDevID)
