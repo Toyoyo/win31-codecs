@@ -1,0 +1,14 @@
+# mciflac.lnk - wlink response file for 16-bit MCI flac driver
+system windows dll initinstance
+name mciflac.drv
+file mciflac.obj
+option map=mciflac.map
+option quiet
+option modname=mciflac
+option description 'flac Audio'
+option heapsize=32768
+library windows.lib
+library mmsystem.lib
+library clibl.lib
+# WEP must be RESIDENTNAME for Windows 3.x
+export WEP.1 RESIDENT

@@ -1,0 +1,12 @@
+OpenOGGFile called 0
+filesize= 3508855
+hdr read n= 4
+hdr[0]= 79
+hdr[1]= 103
+hdr[2]= 103
+hdr[3]= 83
+arena alloc ok 393216
+open_hfile err= 20
+stbv_dbg= 530
+stbv_dbg2= 0
+open_hfile FAILED pVorbis=NULL 20

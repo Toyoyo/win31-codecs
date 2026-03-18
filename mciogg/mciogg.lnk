@@ -1,0 +1,14 @@
+# mciogg.lnk - wlink response file for 16-bit MCI Ogg Vorbis driver
+system windows dll initinstance
+name mciogg.drv
+file mciogg.obj
+option map=mciogg.map
+option quiet
+option modname=mciogg
+option description 'OGG Vorbis Audio'
+option heapsize=32768
+library windows.lib
+library mmsystem.lib
+library clibl.lib
+# WEP must be RESIDENTNAME for Windows 3.x
+export WEP.1 RESIDENT
