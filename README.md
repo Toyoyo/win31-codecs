@@ -64,7 +64,7 @@ mp3=mp3audio
 
 > Note: `mcimp3` is a standalone MCI driver and does not depend on the patched `MSACM.DRV`. It is an alternative to `mp3acm` for playing MP3 files directly, but does not handle MP3 streams inside AVI containers.
 
-You can optionally override the output format by adding a `[mciflac.drv]` section to `SYSTEM.INI` (all three values must be present):
+You can optionally override the output format by adding a `[mcimp3.drv]` section to `SYSTEM.INI` (all three values must be present):
 ```ini
 [mcimp3.drv]
 frequency=22050
