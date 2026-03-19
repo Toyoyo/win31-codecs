@@ -807,6 +807,9 @@ struct stb_vorbis
    unsigned short hfile;       /* Win16 HFILE handle */
    uint32 hfile_start;         /* file offset where stream begins */
    uint32 hfile_len;           /* total byte length of stream */
+   uint8  iobuf[4096];         /* read-ahead buffer for Win16 IO */
+   int    iobuf_pos;           /* current read position in iobuf */
+   int    iobuf_len;           /* valid bytes in iobuf */
 #endif
 
    uint8 *stream;
@@ -1383,7 +1386,15 @@ extern void stbv_gunlockfree(unsigned short h);
 static uint8 get8(vorb *z)
 {
 #ifdef STB_VORBIS_USE_WIN16_IO
-   { uint8 c; if (stbv_lread(z->hfile, &c, 1L) != 1L) { z->eof = TRUE; return 0; } return c; }
+   {
+      if (z->iobuf_pos >= z->iobuf_len) {
+         long r = stbv_lread(z->hfile, z->iobuf, 4096L);
+         if (r <= 0L) { z->eof = TRUE; return 0; }
+         z->iobuf_len = (int)r;
+         z->iobuf_pos = 0;
+      }
+      return z->iobuf[z->iobuf_pos++];
+   }
 #endif
    if (USE_MEMORY(z)) {
       if (z->stream >= z->stream_end) { z->eof = TRUE; return 0; }
@@ -1412,8 +1423,27 @@ static uint32 get32(vorb *f)
 static int getn(vorb *z, uint8 *data, int n)
 {
 #ifdef STB_VORBIS_USE_WIN16_IO
-   if (stbv_lread(z->hfile, data, (long)n) != (long)n) { z->eof = 1; return 0; }
-   return 1;
+   {
+      int remaining = n;
+      while (remaining > 0) {
+         int avail = z->iobuf_len - z->iobuf_pos;
+         if (avail <= 0) {
+            long r = stbv_lread(z->hfile, z->iobuf, 4096L);
+            if (r <= 0L) { z->eof = 1; return 0; }
+            z->iobuf_len = (int)r;
+            z->iobuf_pos = 0;
+            avail = (int)r;
+         }
+         {
+            int chunk = remaining < avail ? remaining : avail;
+            memcpy(data, z->iobuf + z->iobuf_pos, chunk);
+            z->iobuf_pos += chunk;
+            data += chunk;
+            remaining -= chunk;
+         }
+      }
+      return 1;
+   }
 #endif
    if (USE_MEMORY(z)) {
       if (z->stream+n > z->stream_end) { z->eof = 1; return 0; }
@@ -1435,8 +1465,17 @@ static int getn(vorb *z, uint8 *data, int n)
 static void skip(vorb *z, int n)
 {
 #ifdef STB_VORBIS_USE_WIN16_IO
-   stbv_lseek(z->hfile, (long)n, 1); /* 1 = SEEK_CUR */
-   return;
+   {
+      int avail = z->iobuf_len - z->iobuf_pos;
+      if (n <= avail) {
+         z->iobuf_pos += n;
+      } else {
+         n -= avail;
+         z->iobuf_pos = z->iobuf_len = 0;
+         stbv_lseek(z->hfile, (long)n, 1); /* 1 = SEEK_CUR */
+      }
+      return;
+   }
 #endif
    if (USE_MEMORY(z)) {
       z->stream += n;
@@ -1459,7 +1498,9 @@ static int set_file_offset(stb_vorbis *f, unsigned int loc)
    f->eof = 0;
 #ifdef STB_VORBIS_USE_WIN16_IO
    {
-      long r = stbv_lseek(f->hfile, (long)f->hfile_start + (long)loc, 0); /* 0=SEEK_SET */
+      long r;
+      f->iobuf_pos = f->iobuf_len = 0;  /* invalidate read-ahead buffer */
+      r = stbv_lseek(f->hfile, (long)f->hfile_start + (long)loc, 0); /* 0=SEEK_SET */
       if (r < 0L) { f->eof = 1; return 0; }
       return 1;
    }
@@ -4632,6 +4673,7 @@ unsigned int stb_vorbis_get_file_offset(stb_vorbis *f)
 #ifdef STB_VORBIS_USE_WIN16_IO
    {
       long pos = stbv_lseek(f->hfile, 0L, 1); /* 1=SEEK_CUR */
+      pos -= (long)(f->iobuf_len - f->iobuf_pos);  /* subtract unread buffered bytes */
       if (pos < (long)f->hfile_start) return 0;
       return (unsigned int)(pos - (long)f->hfile_start);
    }

@@ -174,6 +174,10 @@ void stbv_gunlockfree(unsigned short h)
 /* Disable push-data API */
 #define STB_VORBIS_NO_PUSHDATA_API
 
+/* Compute codebook elements via integer division rather than pre-expanded
+ * float array.  Avoids huge-pointer overhead on large multiplicands arrays. */
+#define STB_VORBIS_DIVIDES_IN_CODEBOOK
+
 #include "stb_vorbis.c"
 
 #undef int
