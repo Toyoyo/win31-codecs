@@ -1,0 +1,12 @@
+#include <windows.h>
+
+100 DIALOG 30, 20, 200, 92
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "flac Audio Driver"
+BEGIN
+    CTEXT "Opus Audio MCI Driver", -1, 8, 10, 184, 10
+    CTEXT "Plays Opus files in Windows Media Player.", -1, 8, 24, 184, 16
+    CTEXT "Uses opus decoder. Requires a 387-compatible FPU.", -1, 8, 42, 184, 16
+    CTEXT "", 101, 8, 58, 184, 10
+    DEFPUSHBUTTON "OK", IDOK, 76, 74, 48, 14
+END

@@ -11,6 +11,7 @@ A collection of audio and video codec drivers for Windows 3.1, enabling playback
 | `mcimp3/`   | MCI MP3 driver (16-bit, direct MP3 file playback via MCI) |
 | `mciflac/`  | MCI FLAC driver (16-bit, direct FLAC file playback via MCI) |
 | `mciogg/`   | MCI OGG Vorbis driver (16-bit, direct OGG Vorbis file playback via MCI) |
+| `mciopus/`  | MCI Opus driver (16-bit driver + 32-bit Win32s helper, Ogg Opus file playback via MCI) |
 | `xvid16/`   | MPEG-4 ASP VFW codec (XviD/DivX video decoding) |
 | `patched/`  | Patched system drivers required for MP2/MP3 ACM playback |
 
@@ -124,6 +125,34 @@ bitdepth=8
 
 ---
 
+## mciopus — MCI Ogg Opus Audio Driver
+
+A 16-bit MCI driver for Ogg Opus file playback in Windows Media Player and any MCI-aware application. Because Opus decoding requires 32-bit arithmetic, the driver uses a 32-bit Win32s helper process (`opushelp.exe`) communicating through shared memory IPC. Supports seeking, pause/resume, stop, stereo and mono playback decoded at 48 kHz (Opus native rate), and automatic output format negotiation with fallback cascade.
+
+**Requires**: Win32s
+
+**Installation** — copy `mciopus.drv` and `opushelp.exe` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
+```ini
+[MCI]
+opusaudio=mciopus.drv
+```
+```ini
+[MCI Extensions]
+opu=opusaudio
+```
+
+> Note: Ogg Opus files (`.opus`) should be renamed to `.opu` due to the 3-character extension limit.
+
+You can optionally override the output format by adding a `[mciopus.drv]` section to `SYSTEM.INI` (all three values must be present):
+```ini
+[mciopus.drv]
+frequency=22050
+channels=1
+bitdepth=8
+```
+
+---
+
 ## xvid16 — MPEG-4 ASP VFW Codec
 
 A 16-bit Video for Windows (VFW) codec for decoding MPEG-4 ASP video (XviD, DivX 4/5, and compatible FOURCCs). Because XviD is a 32-bit library, the codec uses a 32-bit Win32s helper process (`xvidhlp.exe`) communicating through a shared memory block.
@@ -174,6 +203,7 @@ cd mp3acm  && make
 cd mcimp3  && wmake
 cd mciflac && wmake
 cd mciogg  && wmake
+cd mciopus && wmake
 cd xvid16  && wmake
 ```
 
@@ -186,4 +216,5 @@ cd xvid16  && wmake
 | mcimp3    | OpenWatcom 2.0  | Windows 3.1, 387-compatible FPU |
 | mciflac   | OpenWatcom 2.0  | Windows 3.1, 387-compatible FPU |
 | mciogg    | OpenWatcom 2.0  | Windows 3.1, 387-compatible FPU |
-| xvid16    | OpenWatcom 2.0  | Windows 3.1, Win32s 1.30c+, VFW 1.1e, 387-compatible FPU |
+| mciopus   | OpenWatcom 2.0  | Windows 3.1, Win32s 1.30c |
+| xvid16    | OpenWatcom 2.0  | Windows 3.1, Win32s 1.30c, VFW 1.1e, 387-compatible FPU |

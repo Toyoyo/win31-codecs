@@ -1,0 +1,80 @@
+opus for Debian
+===============
+
+Machine Learning models
+-----------------------
+
+Opus 1.5 is the first release to make extended use of ML in the encoder and
+decoder.
+
+Upstream release tarballs do not include training code nor datasets.
+However, the upstream repository at 
+ https://gitlab.xiph.org/xiph/opus/
+DOES include the code (in 'dnn/torch/') and references where to obtain the
+datasets (in 'dnn/datasets.txt').
+
+Datasets (several gigabytes thereof) are available under the following
+creative commons licenses:
+
+| dataset                                                          | license      |
+|------------------------------------------------------------------|--------------|
+| https://www.openslr.org/resources/30/si_lk.tar.gz                | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/32/af_za.tar.gz                | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/32/st_za.tar.gz                | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/32/tn_za.tar.gz                | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/32/xh_za.tar.gz                | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/37/bn_bd.zip                   | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/37/bn_in.zip                   | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/41/jv_id_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/41/jv_id_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/42/km_kh_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/43/ne_np_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/44/su_id_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/44/su_id_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/61/es_ar_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/61/es_ar_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/63/ml_in_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/63/ml_in_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/64/mr_in_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/65/ta_in_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/65/ta_in_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/66/te_in_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/66/te_in_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/69/ca_es_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/69/ca_es_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/70/en_ng_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/70/en_ng_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/71/es_cl_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/71/es_cl_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/72/es_co_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/72/es_co_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/73/es_pe_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/73/es_pe_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/74/es_pr_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/75/es_ve_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/75/es_ve_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/76/eu_es_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/76/eu_es_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/77/gl_es_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/77/gl_es_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/78/gu_in_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/78/gu_in_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/79/kn_in_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/79/kn_in_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/80/my_mm_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/irish_english_male.zip      | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/midlands_english_female.zip | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/midlands_english_male.zip   | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/northern_english_female.zip | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/northern_english_male.zip   | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/scottish_english_female.zip | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/scottish_english_male.zip   | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/southern_english_female.zip | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/southern_english_male.zip   | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/welsh_english_female.zip    | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/83/welsh_english_male.zip      | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/86/yo_ng_female.zip            | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/86/yo_ng_male.zip              | CC BY-SA 4.0 |
+| https://www.openslr.org/resources/109/hi_fi_tts_v0.tar.gz        | CC BY    4.0 |
+
+ -- IOhannes m zmölnig (Debian/GNU) <umlaeute@debian.org>  Mon, 24 Jun 2024 09:51:20 +0200
