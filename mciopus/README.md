@@ -71,7 +71,7 @@ supported by the sound card, the driver falls back to automatic negotiation.
 
 ```sh
 export WATCOM=/path/to/your/watcom
-wmake -f makefile
+wmake -f Makefile
 ```
 
 This produces `mciopus.drv` (16-bit MCI driver) and `opushelp.exe` (32-bit
