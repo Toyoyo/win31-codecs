@@ -1,0 +1,23 @@
+--- ffmpeg.orig/libavformat/riffenc.c	2025-11-13 18:20:07.000000000 +0100
++++ ffmpeg/libavformat/riffenc.c	2026-02-26 21:29:27.816529063 +0100
+@@ -135,6 +135,20 @@ int ff_put_wav_header(AVFormatContext *s
+         bytespersec = par->sample_rate * blkalign;
+     } else if (par->codec_id == AV_CODEC_ID_G723_1) {
+         bytespersec = 800;
++    } else if (par->codec_id == AV_CODEC_ID_ADPCM_MS) {
++        /* Microsoft ADPCM: nAvgBytesPerSec = nSamplesPerSec * nBlockAlign / nSamplesPerBlock
++         * Compute samples_per_block from block_align and channels: samples_per_block = 2 + (block_align - 7*channels) * 2 / channels */
++        if (blkalign > 0 && par->ch_layout.nb_channels > 0) {
++            int channels = par->ch_layout.nb_channels;
++            int samples_per_block = 2 + (blkalign - 7LL * channels) * 2 / channels;
++            if (samples_per_block > 0) {
++                bytespersec = (int64_t)par->sample_rate * blkalign / samples_per_block;
++            } else {
++                bytespersec = par->bit_rate / 8;
++            }
++        } else {
++            bytespersec = par->bit_rate / 8;
++        }
+     } else {
+         bytespersec = par->bit_rate / 8;
+     }

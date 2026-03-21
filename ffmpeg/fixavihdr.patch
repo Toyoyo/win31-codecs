@@ -1,0 +1,30 @@
+diff -rpuN ffmpeg.mp3orig/libavcodec/libmp3lame.c ffmpeg/libavcodec/libmp3lame.c
+--- ffmpeg.mp3orig/libavcodec/libmp3lame.c	2026-02-27 23:52:12.425363610 +0100
++++ ffmpeg/libavcodec/libmp3lame.c	2026-02-27 23:52:36.245009691 +0100
+@@ -158,6 +158,10 @@ static av_cold int mp3lame_encode_init(A
+ 
+     avctx->frame_size  = lame_get_framesize(s->gfp);
+ 
++    /* Report actual bitrate so muxers write correct nAvgBytesPerSec */
++    if (!avctx->bit_rate)
++        avctx->bit_rate = lame_get_brate(s->gfp) * 1000;
++
+     /* allocate float sample buffers */
+     if (avctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
+         int ch;
+diff -rpuN ffmpeg.mp3orig/libavformat/riffenc.c ffmpeg/libavformat/riffenc.c
+--- ffmpeg.mp3orig/libavformat/riffenc.c	2026-02-27 23:52:11.985370148 +0100
++++ ffmpeg/libavformat/riffenc.c	2026-02-28 00:25:47.567340456 +0100
+@@ -115,7 +115,11 @@ int ff_put_wav_header(AVFormatContext *s
+     if (par->codec_id == AV_CODEC_ID_MP2) {
+         blkalign = (144 * par->bit_rate - 1)/par->sample_rate + 1;
+     } else if (par->codec_id == AV_CODEC_ID_MP3) {
+-        blkalign = 576 * (par->sample_rate <= (24000 + 32000)/2 ? 1 : 2);
++        if (par->bit_rate && par->sample_rate) {
++            int mul = par->sample_rate <= 24000 ? 72 : 144; /* MPEG2 LSF vs MPEG1 */
++            blkalign = (mul * par->bit_rate - 1) / par->sample_rate + 1;
++        } else
++            blkalign = 576 * (par->sample_rate <= (24000 + 32000)/2 ? 1 : 2);
+     } else if (par->codec_id == AV_CODEC_ID_AC3) {
+         blkalign = 3840;                /* maximum bytes per frame */
+     } else if (par->codec_id == AV_CODEC_ID_AAC) {

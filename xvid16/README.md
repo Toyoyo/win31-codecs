@@ -137,7 +137,7 @@ ORed into the color-space value to let XviD handle the vertical flip.
 
 ### Runtime
 - Windows 3.1 or Windows 3.11 for Workgroups
-- Win32s 1.30c or later - required to run the 32-bit helper process
+- Win32s (Tested on 1.30c) required to run the 32-bit helper process
 - Video for Windows 1.1e runtime
 
 ### Build
@@ -205,3 +205,19 @@ MPEG-4 video in AVI containers can now be played with Windows Media Player.
   buffers. Win32s memory is limited by available extended memory.
   (takes about 8MiB for a 640x360 video)
 - **Up to 8 concurrent decoder instances**
+- Even with the patched `MCIAVI.DRV` There are limitations concerning the AVI files that can be played.
+
+  Notably, ffmpeg doesn't generates correct headers for AVI files containing MPEG4 ASP, and `MCIAVI.DRV` doesn't like audio packets with variable sizes.
+
+  There's also an error in headers calculations for MSADCPM.
+
+  You have two options:
+
+  Either:
+
+  - If using MP3 audio, run `fix_avi.py` on AVI files and additionnaly `fix_padding.py` if using a sample rate other than 48Khz (theses scripts are in the `mp3acm` directory in this repo).
+  - If using ADCPM audio, run `fixadpcm.py` on AVI files.
+
+  Or:
+
+  - Patch ffmpeg with the patches provided in the `ffmpeg` directory in this repo.

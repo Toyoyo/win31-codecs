@@ -23,7 +23,7 @@ A 16-bit ACM driver for decoding MP2 audio, using the [minimp3](https://github.c
 
 **Supported sample rates**: 16000, 22050, 24000, 32000, 44100, 48000 Hz (mono and stereo)
 
-**Installation** — copy `mp2acm16.acm` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
+**Installation**: Copy `mp2acm16.acm` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
 ```ini
 [drivers]
 msacm.mp2=mp2acm16.acm
@@ -39,7 +39,7 @@ A 16-bit ACM driver for decoding MP3 audio, using the [minimp3](https://github.c
 
 **Supported sample rates**: 16000, 22050, 24000, 32000, 44100, 48000 Hz (mono and stereo)
 
-**Installation** — copy `mp3acm16.acm` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
+**Installation**: Copy `mp3acm16.acm` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
 ```ini
 [drivers]
 msacm.mp3=mp3acm16.acm
@@ -53,7 +53,7 @@ Requires a patched `MSACM.DRV` (see `patched/`).
 
 A 16-bit MCI driver for direct MP3 file playback in Windows Media Player and any MCI-aware application. Supports CBR and VBR files, seeking, pause/resume, and auto-repeat. Uses hardware FPU (387-compatible coprocessor required).
 
-**Installation** — copy `mcimp3.drv` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
+**Installation**: Copy `mcimp3.drv` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
 ```ini
 [MCI]
 mp3audio=mcimp3.drv
@@ -79,7 +79,7 @@ bitdepth=8
 
 A 16-bit MCI driver for direct FLAC file playback in Windows Media Player and any MCI-aware application. Supports native FLAC and Ogg-FLAC files, seeking, pause/resume, stop, and auto-repeat. Automatically negotiates the best output format supported by the sound card. Uses hardware FPU (387-compatible coprocessor required).
 
-**Installation** — copy `mciflac.drv` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
+**Installation**: Copy `mciflac.drv` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
 ```ini
 [MCI]
 flacaudio=mciflac.drv
@@ -105,7 +105,7 @@ bitdepth=8
 
 A 16-bit MCI driver for direct Ogg Vorbis file playback in Windows Media Player and any MCI-aware application. Supports seeking, pause/resume, stop, and multiplexed Ogg streams (e.g. files with embedded cover art or Theora video — the Vorbis audio stream is located automatically). Automatically negotiates the best output format supported by the sound card. Uses hardware FPU (387-compatible coprocessor required).
 
-**Installation** — copy `mciogg.drv` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
+**Installation**: Copy `mciogg.drv` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
 ```ini
 [MCI]
 oggaudio=mciogg.drv
@@ -129,9 +129,9 @@ bitdepth=8
 
 A 16-bit MCI driver for Ogg Opus file playback in Windows Media Player and any MCI-aware application. Because Opus decoding requires 32-bit arithmetic, the driver uses a 32-bit Win32s helper process (`opushelp.exe`) communicating through shared memory IPC. Supports seeking, pause/resume, stop, stereo and mono playback decoded at 48 kHz (Opus native rate), and automatic output format negotiation with fallback cascade.
 
-**Requires**: Win32s
+**Requires**: Win32s (Tested on 1.30c)
 
-**Installation** — copy `mciopus.drv` and `opushelp.exe` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
+**Installation**: copy `mciopus.drv` and `opushelp.exe` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI` and `WIN.INI`:
 ```ini
 [MCI]
 opusaudio=mciopus.drv
@@ -157,9 +157,11 @@ bitdepth=8
 
 A 16-bit Video for Windows (VFW) codec for decoding MPEG-4 ASP video (XviD, DivX 4/5, and compatible FOURCCs). Because XviD is a 32-bit library, the codec uses a 32-bit Win32s helper process (`xvidhlp.exe`) communicating through a shared memory block.
 
-**Requires**: Win32s 1.30c or later, Video for Windows 1.1e
+**Requires**: Win32s (Tested on 1.30c), Video for Windows 1.1e
 
-**Installation** — copy `xvid16.dll` and `xvidhlp.exe` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
+** Limitations **: See `xvid16/README.md`
+
+**Installation**: Copy `xvid16.dll` and `xvidhlp.exe` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
 ```ini
 [drivers]
 VIDC.XVID=xvid16.dll

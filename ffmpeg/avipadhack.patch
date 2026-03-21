@@ -1,0 +1,87 @@
+diff -rpuN ffmpeg.avifix/libavformat/avienc.c ffmpeg/libavformat/avienc.c
+--- ffmpeg.avifix/libavformat/avienc.c	2026-02-28 02:45:18.005600301 +0100
++++ ffmpeg/libavformat/avienc.c	2026-02-28 02:40:53.917568105 +0100
+@@ -77,6 +77,7 @@ typedef struct AVIContext {
+     int master_index_max_size;
+     int write_channel_mask;
+     int flipped_raw_rgb;
++    int pad_mpeg_audio;
+ } AVIContext;
+ 
+ typedef struct AVIStream {
+@@ -92,6 +93,8 @@ typedef struct AVIStream {
+     AVIIndex indexes;
+ 
+     int64_t strh_flags_offset;
++    int64_t sample_size_offset; /* offset of dwSampleSize in strh, for fixup */
++    int mpeg_audio_pad_size;    /* target frame size for MP2/MP3 padding (0=off) */
+ 
+     uint32_t palette[AVPALETTE_COUNT];
+     uint32_t old_palette[AVPALETTE_COUNT];
+@@ -425,6 +428,7 @@ static int avi_write_header(AVFormatCont
+         else
+             avio_wl32(pb, 0);
+         avio_wl32(pb, -1); /* quality */
++        avist->sample_size_offset = avio_tell(pb);
+         avio_wl32(pb, au_ssize); /* sample size */
+         avio_wl32(pb, 0);
+         if (par->width > 65535 || par->height > 65535) {
+@@ -484,6 +488,30 @@ static int avi_write_header(AVFormatCont
+                 return AVERROR(EINVAL);
+             }
+             ff_end_tag(pb, strf);
++
++            /* For MPEG audio in AVI, pad all frames to uniform size so that
++             * dwSampleSize is nonzero. This works around a seeking bug in
++             * legacy AVI players (e.g. Windows MCIAVI) that malfunction when
++             * dwSampleSize=0 and audio chunk sizes vary. */
++            if (avi->pad_mpeg_audio &&
++                (par->codec_id == AV_CODEC_ID_MP2 ||
++                 par->codec_id == AV_CODEC_ID_MP3) &&
++                par->bit_rate > 0 && par->sample_rate > 0) {
++                int mul = (par->codec_id == AV_CODEC_ID_MP3 &&
++                           par->sample_rate > 24000) ? 144 : 72;
++                int max_frame = (mul * par->bit_rate - 1) / par->sample_rate + 1;
++                avist->mpeg_audio_pad_size = max_frame;
++                /* Rewrite dwSampleSize in strh */
++                if (pb->seekable & AVIO_SEEKABLE_NORMAL) {
++                    int64_t cur = avio_tell(pb);
++                    avio_seek(pb, avist->sample_size_offset, SEEK_SET);
++                    avio_wl32(pb, max_frame);
++                    avio_seek(pb, cur, SEEK_SET);
++                }
++                av_log(s, AV_LOG_INFO, "AVI: padding MPEG audio frames to %d bytes (dwSampleSize=%d)\n",
++                       max_frame, max_frame);
++            }
++
+             if ((t = av_dict_get(st->metadata, "title", NULL, 0))) {
+                 ff_riff_write_info_tag(s->pb, "strn", t->value);
+                 t = NULL;
+@@ -889,6 +917,9 @@ static int avi_write_packet_internal(AVF
+     avi_stream2fourcc(tag, stream_index, par->codec_type);
+     if (pkt->flags & AV_PKT_FLAG_KEY)
+         flags = 0x10;
++    if (avist->mpeg_audio_pad_size > 0 && size > 0 &&
++        size < avist->mpeg_audio_pad_size)
++        size = avist->mpeg_audio_pad_size;
+     if (par->codec_type == AVMEDIA_TYPE_AUDIO)
+         avist->audio_strm_length += size;
+ 
+@@ -901,7 +932,9 @@ static int avi_write_packet_internal(AVF
+ 
+     avio_write(pb, tag, 4);
+     avio_wl32(pb, size);
+-    avio_write(pb, pkt->data, size);
++    avio_write(pb, pkt->data, pkt->size);
++    if (size > pkt->size)
++        ffio_fill(pb, 0, size - pkt->size);
+     if (size & 1)
+         avio_w8(pb, 0);
+ 
+@@ -994,6 +1027,7 @@ static const AVOption options[] = {
+     { "reserve_index_space", "reserve space (in bytes) at the beginning of the file for each stream index", OFFSET(reserve_index_space), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, ENC },
+     { "write_channel_mask", "write channel mask into wave format header", OFFSET(write_channel_mask), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, ENC },
+     { "flipped_raw_rgb", "Raw RGB bitmaps are stored bottom-up", OFFSET(flipped_raw_rgb), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, ENC },
++    { "pad_mpeg_audio", "Pad MP2/MP3 frames to uniform size for legacy player compatibility", OFFSET(pad_mpeg_audio), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, ENC },
+     { NULL },
+ };
