@@ -159,7 +159,7 @@ A 16-bit Video for Windows (VFW) codec for decoding MPEG-4 ASP video (XviD, DivX
 
 **Requires**: Win32s (Tested on 1.30c), Video for Windows 1.1e
 
-** Limitations **: See `xvid16/README.md`
+** Limitations**: See `xvid16/README.md`
 
 **Installation**: Copy `xvid16.dll` and `xvidhlp.exe` to `C:\WINDOWS\SYSTEM\` and add to `SYSTEM.INI`:
 ```ini
