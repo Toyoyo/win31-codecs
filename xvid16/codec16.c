@@ -124,34 +124,77 @@ static BOOL IsValidSrcFormat(LPBITMAPINFOHEADER lpbi)
 /* ------------------------------------------------------------------ */
 /*  Helper: check destination format is something we can output        */
 /* ------------------------------------------------------------------ */
-static BOOL IsValidDstFormat(LPBITMAPINFOHEADER lpbi)
+/* ------------------------------------------------------------------ */
+/*  Helper: map destination BITMAPINFOHEADER to XVID_CSP_xxx           */
+/*  Returns 0 if the format is not one we can output.                  */
+/*  (DWORD, not int: int is 16-bit here and would drop XVID_CSP_VFLIP) */
+/* ------------------------------------------------------------------ */
+static DWORD BitmapToCSP(LPBITMAPINFOHEADER lpbi)
 {
-    if (!lpbi) return FALSE;
-    /* We support RGB15, RGB16, RGB24, RGB32 output */
-    if (lpbi->biCompression != BI_RGB) return FALSE;
+    DWORD csp;
+
     switch (lpbi->biBitCount) {
-        case 15: case 16: case 24: case 32:
-            return TRUE;
+        case 15:
+            if (lpbi->biCompression != BI_RGB) return 0;
+            csp = XVID_CSP_RGB555;
+            break;
+        case 16:
+            /* 16-bit BI_RGB DIBs are 5-5-5; 5-6-5 requires BI_BITFIELDS
+             * with the colour masks following the header. */
+            if (lpbi->biCompression == BI_RGB) {
+                csp = XVID_CSP_RGB555;
+            } else if (lpbi->biCompression == BI_BITFIELDS) {
+                DWORD FAR *mask = (DWORD FAR *)((LPBYTE)lpbi + lpbi->biSize);
+                if (mask[0] == 0xF800UL && mask[1] == 0x07E0UL &&
+                    mask[2] == 0x001FUL)
+                    csp = XVID_CSP_RGB565;
+                else if (mask[0] == 0x7C00UL && mask[1] == 0x03E0UL &&
+                         mask[2] == 0x001FUL)
+                    csp = XVID_CSP_RGB555;
+                else
+                    return 0;
+            } else {
+                return 0;
+            }
+            break;
+        case 24:
+            if (lpbi->biCompression != BI_RGB) return 0;
+            csp = XVID_CSP_BGR;
+            break;
+        case 32:
+            /* DIB byte order is B,G,R,X */
+            if (lpbi->biCompression != BI_RGB) return 0;
+            csp = XVID_CSP_BGRA;
+            break;
         default:
-            return FALSE;
+            return 0;
     }
+
+    /* Bottom-up DIBs (positive height) need XviD to flip vertically */
+    if (lpbi->biHeight > 0)
+        csp |= XVID_CSP_VFLIP;
+    return csp;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Helper: map BITMAPINFOHEADER bit-depth to XVID_CSP_xxx             */
+/*  Helper: check destination format is something we can output        */
 /* ------------------------------------------------------------------ */
-static int BitmapToCSP(LPBITMAPINFOHEADER lpbi)
+static BOOL IsValidDstFormat(LPBITMAPINFOHEADER lpbi)
 {
-    /* VFW DIBs are bottom-up, XviD needs VFLIP for that */
-    DWORD vflip = XVID_CSP_VFLIP;
+    if (!lpbi) return FALSE;
+    /* RGB15, RGB16 (555 or 565 bitfields), RGB24, RGB32 */
+    return BitmapToCSP(lpbi) != 0;
+}
 
-    switch (lpbi->biBitCount) {
-        case 15: return (int)(XVID_CSP_RGB555 | vflip);
-        case 16: return (int)(XVID_CSP_RGB565 | vflip);
-        case 24: return (int)(XVID_CSP_BGR    | vflip);
-        case 32: return (int)(XVID_CSP_RGBA   | vflip);
-        default: return -1;
-    }
+/* ------------------------------------------------------------------ */
+/*  Helper: byte size of a DIB image                                   */
+/* ------------------------------------------------------------------ */
+static DWORD DibImageSize(LPBITMAPINFOHEADER lpbi)
+{
+    DWORD bits = (lpbi->biBitCount == 15) ? 16 : lpbi->biBitCount;
+    DWORD stride = (((DWORD)lpbi->biWidth * bits + 31) / 32) * 4;
+    LONG  h = lpbi->biHeight < 0 ? -lpbi->biHeight : lpbi->biHeight;
+    return stride * (DWORD)h;
 }
 
 /* ------------------------------------------------------------------ */
@@ -246,6 +289,39 @@ static void TermIPC(void)
         g_hSharedMem = NULL;
     }
     g_bWin32s = FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Make sure the shared src/dst buffers are at least the given sizes. */
+/*  The buffers are shared by all codec instances, so they only grow:  */
+/*  freeing them on one instance's BEGIN would pull them out from      */
+/*  under another instance that is still decoding.                     */
+/* ------------------------------------------------------------------ */
+#define SRC_BUF_MIN     (256UL * 1024UL)
+
+static BOOL EnsureBuffers(DWORD cbSrc, DWORD cbDst)
+{
+    HANDLE h;
+
+    if (cbSrc < SRC_BUF_MIN) cbSrc = SRC_BUF_MIN;
+
+    if (cbSrc > g_dwSrcBufSize) {
+        h = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE, cbSrc);
+        if (!h) return FALSE;
+        if (g_hSrcBuf) { GlobalUnlock(g_hSrcBuf); GlobalFree(g_hSrcBuf); }
+        g_hSrcBuf      = h;
+        g_lpSrcBuf     = GlobalLock(h);
+        g_dwSrcBufSize = cbSrc;
+    }
+    if (cbDst > g_dwDstBufSize) {
+        h = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE | GMEM_ZEROINIT, cbDst);
+        if (!h) return FALSE;
+        if (g_hDstBuf) { GlobalUnlock(g_hDstBuf); GlobalFree(g_hDstBuf); }
+        g_hDstBuf      = h;
+        g_lpDstBuf     = GlobalLock(h);
+        g_dwDstBufSize = cbDst;
+    }
+    return g_lpSrcBuf && g_lpDstBuf;
 }
 
 /* ------------------------------------------------------------------ */
@@ -418,6 +494,8 @@ static LRESULT icm_DecompressQuery(LPBITMAPINFOHEADER lpbiSrc,
     return ICERR_OK;
 }
 
+static LRESULT icm_DecompressEnd(CODEC_INSTANCE FAR *pInst); /* forward */
+
 /* ICM_DECOMPRESS_BEGIN */
 static LRESULT icm_DecompressBegin(CODEC_INSTANCE FAR *pInst,
                                    LPBITMAPINFOHEADER lpbiSrc,
@@ -432,6 +510,12 @@ static LRESULT icm_DecompressBegin(CODEC_INSTANCE FAR *pInst,
     if (!g_bWin32s) {
         if (!InitIPC()) return ICERR_INTERNAL;
     }
+
+    /* BEGIN may be sent again without an END (e.g. format change) */
+    icm_DecompressEnd(pInst);
+
+    if (!EnsureBuffers(lpbiSrc->biSizeImage, DibImageSize(lpbiDst)))
+        return ICERR_MEMORY;
 
     pInst->fccHandler = lpbiSrc->biCompression;
     pInst->width      = (int)lpbiSrc->biWidth;
@@ -473,7 +557,7 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
                                LPBITMAPINFOHEADER lpbiDst,
                                LPVOID lpDst)
 {
-    int csp;
+    DWORD csp;
     DWORD rc;
 
     if (!pInst->hXvidHandle) return ICERR_INTERNAL;
@@ -482,11 +566,17 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
     if (dwFlags & ICDECOMPRESS_NULLFRAME) return ICERR_OK;
 
     csp = BitmapToCSP(lpbiDst);
-    if (csp < 0) return ICERR_BADFORMAT;
+    if (!csp) return ICERR_BADFORMAT;
 
     {
-        DWORD dstStride = (DWORD)(((lpbiDst->biWidth * lpbiDst->biBitCount + 31) / 32) * 4);
-        DWORD dstBytes = dstStride * (DWORD)(lpbiDst->biHeight < 0 ? -lpbiDst->biHeight : lpbiDst->biHeight);
+        DWORD dstBytes  = DibImageSize(lpbiDst);
+        LONG  h = lpbiDst->biHeight < 0 ? -lpbiDst->biHeight : lpbiDst->biHeight;
+        DWORD dstStride = h ? dstBytes / (DWORD)h : 0;
+
+        /* Grow buffers if this frame (or the output format) is larger
+         * than what BEGIN allocated; never decode stale src data. */
+        if (!EnsureBuffers(lpbiSrc->biSizeImage, dstBytes))
+            return ICERR_MEMORY;
 
         g_pShared->cmd       = IPC_CMD_DECODE;
         g_pShared->handle    = pInst->hXvidHandle;
@@ -494,11 +584,10 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
         g_pShared->srcSize   = lpbiSrc->biSizeImage;
         g_pShared->dstStride = dstStride;
         g_pShared->dstSize   = dstBytes;
-        g_pShared->dstFormat = csp;
+        g_pShared->dstFormat = (LONG)csp;
 
         /* Copy compressed data into shared src buffer */
-        if (g_lpSrcBuf && lpbiSrc->biSizeImage <= g_dwSrcBufSize)
-            hmemcpy(g_lpSrcBuf, lpSrc, lpbiSrc->biSizeImage);
+        hmemcpy(g_lpSrcBuf, lpSrc, lpbiSrc->biSizeImage);
         g_pShared->hSrcMem   = (DWORD)(WORD)g_hSrcBuf;
         g_pShared->hDstMem   = (DWORD)(WORD)g_hDstBuf;
 
@@ -587,17 +676,11 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
     stride = (DWORD)(((DWORD)pInst->width * 24 + 31) / 32) * 4;
     dibSize = stride * (DWORD)pInst->height;
 
-    /* Allocate GMEM_SHARE buffers for cross-bitness data transfer.
-     * src: compressed frame (256KB should be enough)
+    /* GMEM_SHARE buffers for cross-bitness data transfer.
+     * src: compressed frame (grown in ICM_DRAW if a frame is larger)
      * dst: decoded RGB (dibSize) */
-    if (g_hSrcBuf) { GlobalUnlock(g_hSrcBuf); GlobalFree(g_hSrcBuf); }
-    if (g_hDstBuf) { GlobalUnlock(g_hDstBuf); GlobalFree(g_hDstBuf); }
-    g_dwSrcBufSize = 256UL * 1024UL;
-    g_dwDstBufSize = dibSize;
-    g_hSrcBuf = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE, g_dwSrcBufSize);
-    g_hDstBuf = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE | GMEM_ZEROINIT, g_dwDstBufSize);
-    if (g_hSrcBuf) g_lpSrcBuf = GlobalLock(g_hSrcBuf);
-    if (g_hDstBuf) g_lpDstBuf = GlobalLock(g_hDstBuf);
+    if (!EnsureBuffers(SRC_BUF_MIN, dibSize))
+        return ICERR_MEMORY;
 
     /* Set up output BITMAPINFOHEADER for StretchDIBits/SetDIBitsToDevice */
     _fmemset(&pInst->biDraw, 0, sizeof(BITMAPINFOHEADER));
@@ -640,15 +723,17 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
         g_pShared->dstSize   = stride * (DWORD)pInst->height;
         g_pShared->dstFormat = (LONG)(XVID_CSP_BGR | XVID_CSP_VFLIP);
 
-        /* Copy compressed data into shared src buffer */
-        if (g_lpSrcBuf && pDraw->cbData <= g_dwSrcBufSize) {
+        /* Copy compressed data into shared src buffer, growing it for
+         * an unusually large frame; skip the decode if that fails
+         * rather than decoding stale data. */
+        if (EnsureBuffers(pDraw->cbData, 0)) {
             hmemcpy(g_lpSrcBuf, pDraw->lpData, pDraw->cbData);
-        }
-        g_pShared->hSrcMem = (DWORD)(WORD)g_hSrcBuf;
-        g_pShared->hDstMem = (DWORD)(WORD)g_hDstBuf;
+            g_pShared->hSrcMem = (DWORD)(WORD)g_hSrcBuf;
+            g_pShared->hDstMem = (DWORD)(WORD)g_hDstBuf;
 
-        rc = CallHelper();
-        (void)rc;
+            rc = CallHelper();
+            (void)rc;
+        }
     }
 
     /* Skip painting if hurry-up (decode only for reference frames) */
@@ -822,7 +907,11 @@ LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
         }
 
     case ICM_DECOMPRESSEX_BEGIN:
-        return ICERR_OK;
+        if (!pInst) return ICERR_BADHANDLE;
+        {
+            ICDECOMPRESSEX FAR *p = (ICDECOMPRESSEX FAR *)lParam1;
+            return icm_DecompressBegin(pInst, p->lpbiSrc, p->lpbiDst);
+        }
 
     case ICM_DECOMPRESSEX:
         if (!pInst) return ICERR_BADHANDLE;
