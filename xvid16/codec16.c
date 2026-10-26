@@ -22,6 +22,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "codec16.h"
 
@@ -58,6 +59,37 @@ static DWORD            g_dwDstBufSize  = 0;
 
 /* Per-instance table */
 static CODEC_INSTANCE g_aInst[MAX_INSTANCES];
+
+/* ------------------------------------------------------------------ */
+/*  Diagnostics: [xvid16] debug=1 in WIN.INI or SYSTEM.INI appends to  */
+/*  <windir>\XVID16.LOG                                                */
+/* ------------------------------------------------------------------ */
+static void DbgLog(LPCSTR fmt, ...)
+{
+    char path[144], buf[200];
+    HFILE hf;
+    int n;
+    va_list ap;
+
+    if (!GetProfileInt("xvid16", "debug", 0) &&
+        !GetPrivateProfileInt("xvid16", "debug", 0, "SYSTEM.INI"))
+        return;
+    n = GetWindowsDirectory(path, sizeof(path) - 16);
+    if (n && path[n - 1] != '\\') path[n++] = '\\';
+    lstrcpy(path + n, "XVID16.LOG");
+
+    va_start(ap, fmt);
+    n = wvsprintf(buf, fmt, (LPSTR)ap);
+    va_end(ap);
+    buf[n++] = '\r'; buf[n++] = '\n';
+
+    hf = _lopen(path, OF_WRITE | OF_SHARE_DENY_NONE);
+    if (hf == HFILE_ERROR) hf = _lcreat(path, 0);
+    if (hf == HFILE_ERROR) return;
+    _llseek(hf, 0L, 2);
+    _lwrite(hf, buf, n);
+    _lclose(hf);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helper: check if a FOURCC is one we support                        */
@@ -138,8 +170,15 @@ static BOOL InitIPC(void)
     if (!g_hSharedMem) {
         return FALSE;
     }
+    /* Pin the block in linear memory. The helper GlobalLock's it once
+     * and keeps the flat address for its whole life; GlobalLock alone
+     * does not stop a moveable block from moving (only its selector is
+     * stable), so compaction - e.g. when ICM_DRAW_BEGIN allocates the
+     * frame buffers - would leave the helper polling stale memory. */
+    GlobalFix(g_hSharedMem);
     g_pShared = (IPC_PARAMS FAR *)GlobalLock(g_hSharedMem);
     if (!g_pShared) {
+        GlobalUnfix(g_hSharedMem);
         GlobalFree(g_hSharedMem);
         g_hSharedMem = NULL;
         return FALSE;
@@ -153,10 +192,19 @@ static BOOL InitIPC(void)
         wsprintf(cmdLine, "XVIDHLP.EXE %04X", h);
     }
 
+    /* A helper left over from a previous load would answer FindWindow
+     * below while polling a different (stale) shared block. */
+    DbgLog("InitIPC: hShared=%04X, existing helper hwnd=%04X",
+           (WORD)g_hSharedMem, (WORD)FindWindow("XviDHelper", NULL));
+
     uOldErr = SetErrorMode(SEM_NOOPENFILEERRORBOX);
-    if (WinExec(cmdLine, SW_HIDE) < 32) {
-        SetErrorMode(uOldErr);
-        return FALSE;
+    {
+        UINT rcExec = WinExec(cmdLine, SW_HIDE);
+        DbgLog("InitIPC: WinExec('%s') = %u", (LPSTR)cmdLine, rcExec);
+        if (rcExec < 32) {
+            SetErrorMode(uOldErr);
+            return FALSE;
+        }
     }
     SetErrorMode(uOldErr);
 
@@ -168,6 +216,8 @@ static BOOL InitIPC(void)
         if (g_hwndHelper) break;
     }
 
+    DbgLog("InitIPC: helper hwnd=%04X after %d tries",
+           (WORD)g_hwndHelper, tries);
     if (!g_hwndHelper) {
         return FALSE;
     }
@@ -191,6 +241,7 @@ static void TermIPC(void)
         g_pShared = NULL;
     }
     if (g_hSharedMem) {
+        GlobalUnfix(g_hSharedMem);
         GlobalFree(g_hSharedMem);
         g_hSharedMem = NULL;
     }
@@ -202,15 +253,21 @@ static void TermIPC(void)
 /* ------------------------------------------------------------------ */
 static DWORD CallHelper(void)
 {
-    int timeout, spin;
+    int spin;
+    DWORD t0;
 
     if (!g_pShared)
         return (DWORD)ICERR_INTERNAL;
 
     /* Signal command ready and wait for helper to process it */
+    t0 = GetTickCount();
     g_pShared->cmdReady = 1;
 
-    for (timeout = 0; timeout < 5000; timeout++) {
+    /* Timeout is wall-clock, not an iteration count: the helper may be
+     * blocked in Sleep(1) for a full 55 ms timer tick, during which our
+     * Yield() won't schedule it. On a fast CPU an iteration-based limit
+     * can expire before the helper ever wakes up. */
+    for (;;) {
         /* Spin briefly before yielding — the 32-bit side often
          * completes in microseconds, so avoid the full task-switch
          * cost of Yield() when possible. */
@@ -221,7 +278,16 @@ static DWORD CallHelper(void)
         Yield();
         if (!g_pShared->cmdReady)
             return g_pShared->result;
+        if (GetTickCount() - t0 > 2000UL)
+            break;
     }
+
+    /* Cancel the pending command so the helper doesn't run it later
+     * against stale parameters. Safe: scheduling is cooperative, so the
+     * helper cannot be mid-command while we are running. */
+    g_pShared->cmdReady = 0;
+    DbgLog("CallHelper: TIMEOUT cmd=%lu, helper window %s",
+           g_pShared->cmd, (LPSTR)(IsWindow(g_hwndHelper) ? "alive" : "gone"));
 
     /* Timeout: check if helper process is still alive.
      * If its window is gone, null g_hwndHelper so future frames skip decode

@@ -21,6 +21,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include "xvid.h"
 #include "codec16.h"
@@ -41,16 +42,71 @@ typedef struct {
 static DEC_INSTANCE g_aInst32[MAX_INSTANCES32];
 static BOOL         g_bXvidInited = FALSE;
 
+/* ------------------------------------------------------------------ */
+/*  Diagnostics, controlled from WIN.INI:                              */
+/*    [xvid16]   (in WIN.INI or SYSTEM.INI)                            */
+/*    debug=1        append trace to <windir>\XVIDHLP.LOG              */
+/*    cpu=auto|c|mmx|mmxext   override xvidcore CPU detection          */
+/* ------------------------------------------------------------------ */
+static BOOL g_bLog = FALSE;
+static char g_szLog[MAX_PATH];
+
+static void Log(const char *fmt, ...)
+{
+    char buf[256];
+    HANDLE hf;
+    DWORD n;
+    va_list ap;
+
+    if (!g_bLog) return;
+    va_start(ap, fmt);
+    n = (DWORD)wvsprintfA(buf, fmt, ap);
+    va_end(ap);
+    buf[n++] = '\r'; buf[n++] = '\n';
+
+    /* Open/append/close each time so the log survives a hang or crash */
+    hf = CreateFileA(g_szLog, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                     FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(hf, 0, NULL, FILE_END);
+    WriteFile(hf, buf, n, &n, NULL);
+    CloseHandle(hf);
+}
+
 static BOOL EnsureXvidInit(void)
 {
     if (g_bXvidInited) return TRUE;
     {
         xvid_gbl_init_t gbl;
+        char cpu[16];
+        int ret;
+
         memset(&gbl, 0, sizeof(gbl));
         gbl.version = XVID_VERSION;
         gbl.debug   = 0;
         gbl.cpu_flags = 0;
-        if (xvid_global(NULL, XVID_GBL_INIT, &gbl, NULL) < 0)
+
+        /* Runtime detection probes SSE by executing SSE instructions and
+         * catching SIGILL. Windows 3.1 never sets CR4.OSFXSR, so these
+         * fault; allow forcing a non-SSE tier in case the probe itself
+         * misbehaves under Win32s. */
+        GetProfileStringA("xvid16", "cpu", "auto", cpu, sizeof(cpu));
+        if (!lstrcmpiA(cpu, "auto"))
+            GetPrivateProfileStringA("xvid16", "cpu", "auto", cpu,
+                                     sizeof(cpu), "SYSTEM.INI");
+        if (!lstrcmpiA(cpu, "c"))
+            gbl.cpu_flags = XVID_CPU_FORCE;
+        else if (!lstrcmpiA(cpu, "mmx"))
+            gbl.cpu_flags = XVID_CPU_FORCE | XVID_CPU_ASM | XVID_CPU_MMX;
+        else if (!lstrcmpiA(cpu, "mmxext"))
+            gbl.cpu_flags = XVID_CPU_FORCE | XVID_CPU_ASM | XVID_CPU_MMX
+                          | XVID_CPU_MMXEXT;
+
+        Log("init: cpu=%s flags=%08lX, calling XVID_GBL_INIT", cpu,
+            (DWORD)gbl.cpu_flags);
+        ret = xvid_global(NULL, XVID_GBL_INIT, &gbl, NULL);
+        Log("init: XVID_GBL_INIT returned %d", ret);
+        if (ret < 0)
             return FALSE;
         g_bXvidInited = TRUE;
     }
@@ -204,7 +260,13 @@ static DWORD Cmd_Decode(IPC_PARAMS *p)
 
 static void DispatchCommand(IPC_PARAMS *p)
 {
+    static DWORD nDecodes = 0;
     DWORD result;
+    BOOL bTrace = (p->cmd != IPC_CMD_DECODE || ++nDecodes <= 5);
+
+    if (bTrace)
+        Log("cmd %lu handle=%lu %ldx%ld src=%lu", p->cmd, p->handle,
+            p->width, p->height, p->srcSize);
     switch (p->cmd) {
         case IPC_CMD_OPEN:    result = Cmd_Open(p);   break;
         case IPC_CMD_CLOSE:   result = Cmd_Close(p);  break;
@@ -212,6 +274,9 @@ static void DispatchCommand(IPC_PARAMS *p)
         default:                result = (DWORD)ICERR_UNSUPPORTED; break;
     }
     p->result = result;
+    if (bTrace || result != (DWORD)ICERR_OK)
+        Log("cmd %lu -> result %ld handle=%lu", p->cmd, (LONG)result,
+            p->handle);
 }
 
 /* ------------------------------------------------------------------ */
@@ -243,11 +308,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
 
     (void)hPrev; (void)nCmdShow;
 
+    g_bLog = GetProfileIntA("xvid16", "debug", 0) != 0 ||
+             GetPrivateProfileIntA("xvid16", "debug", 0, "SYSTEM.INI") != 0;
+    if (g_bLog) {
+        UINT n = GetWindowsDirectoryA(g_szLog, MAX_PATH - 16);
+        if (n && g_szLog[n - 1] != '\\') g_szLog[n++] = '\\';
+        lstrcpyA(g_szLog + n, "XVIDHLP.LOG");
+    }
+    Log("---- helper start, cmdline '%s'", lpCmdLine);
+
     /* Parse HGLOBAL handle from command line (hex) */
     hShared = (HGLOBAL)(DWORD)strtoul(lpCmdLine, NULL, 16);
     if (!hShared) return 1;
 
     p = (IPC_PARAMS *)GlobalLock(hShared);
+    Log("GlobalLock(%08lX) = %08lX", (DWORD)hShared, (DWORD)p);
     if (!p) return 1;
 
     memset(g_aInst32, 0, sizeof(g_aInst32));
@@ -264,6 +339,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
                          0, 0, 0, 0, 0,
                          NULL, NULL, hInst, NULL);
     if (!hwnd) return 1;
+    Log("window created, entering loop");
 
     /* Main loop: poll shared memory for commands, process messages.
      * Spin briefly before sleeping to minimize latency — on Win32s
@@ -299,6 +375,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
     }
 
 done:
+    Log("helper exiting (quit=%lu)", p->quit);
     /* Cleanup decoder instances */
     {
         int i;
