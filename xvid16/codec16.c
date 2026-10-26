@@ -621,38 +621,130 @@ static LRESULT icm_DecompressEx(CODEC_INSTANCE FAR *pInst,
 
 static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst); /* forward */
 
+/* ------------------------------------------------------------------ */
+/*  Paint the last decoded frame into the ICM_DRAW_BEGIN destination.  */
+/*  Per ICDrawBegin: the destination rect is relative to the window or */
+/*  DC, the source rect is relative to the full frame and is stretched */
+/*  to fit. A zero-sized rect falls back to client area / full frame.  */
+/* ------------------------------------------------------------------ */
+static void PaintFrame(CODEC_INSTANCE FAR *pInst)
+{
+    HDC hdc;
+    int xDst, yDst, dxDst, dyDst;
+    int xSrc, ySrc, dxSrc, dySrc;
+    int w = pInst->width, h = pInst->height;
+
+    if (!g_lpDstBuf || pInst->bDrawOff) return;
+
+    /* Prefer a fresh DC for the window: a DC passed in ICM_DRAW_BEGIN
+     * may have been released by the caller since. Fall back to that DC
+     * only when no window was given. */
+    hdc = pInst->hwndDraw ? GetDC(pInst->hwndDraw) : pInst->hdcDraw;
+    if (!hdc) return;
+
+    xDst = pInst->xDst;  yDst = pInst->yDst;
+    dxDst = pInst->dxDst; dyDst = pInst->dyDst;
+    if (dxDst <= 0 || dyDst <= 0) {
+        xDst = yDst = 0;
+        dxDst = w; dyDst = h;
+        if (pInst->hwndDraw) {
+            RECT crc;
+            GetClientRect(pInst->hwndDraw, &crc);
+            dxDst = crc.right - crc.left;
+            dyDst = crc.bottom - crc.top;
+        }
+    }
+
+    xSrc = pInst->xSrc;  ySrc = pInst->ySrc;
+    dxSrc = pInst->dxSrc; dySrc = pInst->dySrc;
+    if (dxSrc <= 0 || dySrc <= 0) {
+        xSrc = ySrc = 0;
+        dxSrc = w; dySrc = h;
+    }
+
+    if (xSrc == 0 && ySrc == 0 && dxSrc == w && dySrc == h &&
+        dxDst == w && dyDst == h) {
+        /* 1:1 full frame: SetDIBitsToDevice bypasses the stretch
+         * engine and is significantly faster. */
+        SetDIBitsToDevice(hdc,
+                          xDst, yDst,
+                          (WORD)w, (WORD)h,
+                          0, 0,
+                          0, (WORD)h,
+                          g_lpDstBuf,
+                          (LPBITMAPINFO)&pInst->biDraw,
+                          DIB_RGB_COLORS);
+    } else {
+        /* The DIB is bottom-up, so GDI measures the source y from the
+         * bottom row; the ICDRAWBEGIN source rect is measured from the
+         * top of the frame. */
+        StretchDIBits(hdc,
+                      xDst, yDst, dxDst, dyDst,
+                      xSrc, h - (ySrc + dySrc), dxSrc, dySrc,
+                      g_lpDstBuf,
+                      (LPBITMAPINFO)&pInst->biDraw,
+                      DIB_RGB_COLORS,
+                      SRCCOPY);
+    }
+
+    if (pInst->hwndDraw)
+        ReleaseDC(pInst->hwndDraw, hdc);
+}
+
 /* ICM_DRAW_BEGIN */
 static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
                               ICDRAWBEGIN FAR *pDB)
 {
     DWORD dibSize, stride, rc;
+    DWORD fcc;
+    int   w, h;
 
     if (!pDB || !pDB->lpbi) return ICERR_BADPARAM;
     if (!IsSupportedFOURCC(pDB->lpbi->biCompression)) return ICERR_BADFORMAT;
 
-    /* Clean up previous draw state if re-entered */
-    if (pInst->hwndDraw) {
+    DbgLog("DRAW_BEGIN flags=%08lX hwnd=%04X hdc=%04X dst=%d,%d %dx%d "
+           "src=%d,%d %dx%d", pDB->dwFlags, (WORD)pDB->hwnd, (WORD)pDB->hdc,
+           pDB->xDst, pDB->yDst, pDB->dxDst, pDB->dyDst,
+           pDB->xSrc, pDB->ySrc, pDB->dxSrc, pDB->dySrc);
+
+    /* We only draw into a window/DC. Refusing full-screen lets MCIAVI
+     * fall back to its own full-screen handling instead of us painting
+     * onto GetDC(NULL), i.e. the desktop. */
+    if (pDB->dwFlags & ICDRAW_FULLSCREEN) return ICERR_UNSUPPORTED;
+
+    /* Query only: report that we can draw this, change nothing */
+    if (pDB->dwFlags & ICDRAW_QUERY) return ICERR_OK;
+
+    fcc = pDB->lpbi->biCompression;
+    w   = (int)pDB->lpbi->biWidth;
+    h   = (int)(pDB->lpbi->biHeight < 0 ? -pDB->lpbi->biHeight
+                                        :  pDB->lpbi->biHeight);
+
+    /* ICM_DRAW_BEGIN does not nest: a second BEGIN restarts drawing with
+     * new parameters (typically a new destination rect). If the stream
+     * itself is unchanged, keep the decoder so the next P-frame still
+     * has its reference picture instead of decoding garbage until the
+     * next keyframe. */
+    if (pInst->hXvidHandle &&
+        (fcc != pInst->fccHandler || w != pInst->width || h != pInst->height))
         icm_DrawEnd(pInst);
-    }
-    if (pInst->hXvidHandle && g_bWin32s && g_pShared) {
-        g_pShared->cmd    = IPC_CMD_CLOSE;
-        g_pShared->handle = pInst->hXvidHandle;
-        CallHelper();
-        pInst->hXvidHandle = 0;
-    }
 
     /* Save draw parameters */
     pInst->hwndDraw = pDB->hwnd;
+    pInst->hdcDraw  = pDB->hdc;
     pInst->xDst  = pDB->xDst;
     pInst->yDst  = pDB->yDst;
     pInst->dxDst = pDB->dxDst;
     pInst->dyDst = pDB->dyDst;
+    pInst->xSrc  = pDB->xSrc;
+    pInst->ySrc  = pDB->ySrc;
+    pInst->dxSrc = pDB->dxSrc;
+    pInst->dySrc = pDB->dySrc;
+    pInst->bDrawOff = FALSE;
 
-    pInst->fccHandler = pDB->lpbi->biCompression;
-    pInst->width  = (int)pDB->lpbi->biWidth;
-    pInst->height = (int)(pDB->lpbi->biHeight < 0
-                          ? -pDB->lpbi->biHeight
-                          :  pDB->lpbi->biHeight);
+    pInst->fccHandler = fcc;
+    pInst->width  = w;
+    pInst->height = h;
 
     /* Lazy-init helper process - non-fatal if it fails */
     if (!g_bWin32s) {
@@ -660,7 +752,7 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
     }
 
     /* Open XviD decoder via helper process */
-    if (g_bWin32s && g_hwndHelper && g_pShared) {
+    if (!pInst->hXvidHandle && g_bWin32s && g_hwndHelper && g_pShared) {
         g_pShared->cmd    = IPC_CMD_OPEN;
         g_pShared->width  = pInst->width;
         g_pShared->height = pInst->height;
@@ -700,7 +792,6 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
                               ICDRAW FAR *pDraw)
 {
     DWORD rc, stride;
-    HDC hdc;
 
     /* UPDATE flag: repaint last frame without decoding */
     if (pDraw->dwFlags & ICDRAW_UPDATE) goto paint;
@@ -742,37 +833,7 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
 
     /* Paint the decoded frame to the window */
 paint:
-    hdc = GetDC(pInst->hwndDraw);
-    if (hdc) {
-        RECT crc;
-        int dxDst, dyDst;
-        GetClientRect(pInst->hwndDraw, &crc);
-        dxDst = (int)(crc.right - crc.left);
-        dyDst = (int)(crc.bottom - crc.top);
-        /* Use SetDIBitsToDevice when no scaling is needed — it
-         * bypasses the stretch engine and is significantly faster. */
-        if (dxDst == pInst->width && dyDst == pInst->height) {
-            SetDIBitsToDevice(hdc,
-                              0, 0,
-                              (WORD)pInst->width, (WORD)pInst->height,
-                              0, 0,
-                              0, (WORD)pInst->height,
-                              g_lpDstBuf,
-                              (LPBITMAPINFO)&pInst->biDraw,
-                              DIB_RGB_COLORS);
-        } else {
-            StretchDIBits(hdc,
-                          0, 0, dxDst, dyDst,
-                          0, 0,
-                          pInst->width, pInst->height,
-                          g_lpDstBuf,
-                          (LPBITMAPINFO)&pInst->biDraw,
-                          DIB_RGB_COLORS,
-                          SRCCOPY);
-        }
-        ReleaseDC(pInst->hwndDraw, hdc);
-    }
-
+    PaintFrame(pInst);
     return ICERR_OK;
 }
 
@@ -963,47 +1024,18 @@ LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
 
     case ICM_DRAW_UPDATE:
         /* Repaint last frame (e.g. after window was uncovered) */
-        if (pInst && g_lpDstBuf && pInst->hwndDraw) {
-            HDC hdc = GetDC(pInst->hwndDraw);
-            if (hdc) {
-                RECT crc;
-                int dxDst, dyDst;
-                GetClientRect(pInst->hwndDraw, &crc);
-                dxDst = (int)(crc.right - crc.left);
-                dyDst = (int)(crc.bottom - crc.top);
-                if (dxDst == pInst->width && dyDst == pInst->height) {
-                    SetDIBitsToDevice(hdc,
-                                      0, 0,
-                                      (WORD)pInst->width, (WORD)pInst->height,
-                                      0, 0,
-                                      0, (WORD)pInst->height,
-                                      g_lpDstBuf,
-                                      (LPBITMAPINFO)&pInst->biDraw,
-                                      DIB_RGB_COLORS);
-                } else {
-                    StretchDIBits(hdc,
-                                  0, 0, dxDst, dyDst,
-                                  0, 0,
-                                  pInst->width, pInst->height,
-                                  g_lpDstBuf,
-                                  (LPBITMAPINFO)&pInst->biDraw,
-                                  DIB_RGB_COLORS,
-                                  SRCCOPY);
-                }
-                ReleaseDC(pInst->hwndDraw, hdc);
-            }
-        }
+        if (pInst && pInst->hwndDraw)
+            PaintFrame(pInst);
         return ICERR_OK;
 
     case ICM_DRAW_WINDOW:
-        /* Update draw rectangle - lParam1 = RECT FAR * */
-        if (pInst && lParam1) {
-            RECT FAR *prc = (RECT FAR *)lParam1;
-            pInst->xDst  = (short)prc->left;
-            pInst->yDst  = (short)prc->top;
-            pInst->dxDst = (short)(prc->right - prc->left);
-            pInst->dyDst = (short)(prc->bottom - prc->top);
-        }
+        /* lParam1 = RECT FAR * in *screen* coordinates. This exists for
+         * overlay hardware that must track the window; GDI drawing is
+         * already positioned and clipped by the window manager, so the
+         * rect is not our destination. We only honour the documented
+         * "empty rect = window fully hidden, stop drawing". */
+        if (pInst && lParam1)
+            pInst->bDrawOff = IsRectEmpty((RECT FAR *)lParam1);
         return ICERR_OK;
 
     case ICM_DRAW_REALIZE:
