@@ -1,0 +1,883 @@
+diff --git a/xvid16/README.md b/xvid16/README.md
+index 9677ad2..8331798 100644
+--- a/xvid16/README.md
++++ b/xvid16/README.md
+@@ -28,10 +28,10 @@ allocated with `GMEM_SHARE`.
+ ### IPC Protocol
+ 
+ 1. `xvid16.dll` allocates an `IPC_PARAMS` block with `GlobalAlloc(GMEM_SHARE)` and launches `xvidhlp.exe`, passing the `HGLOBAL` handle on the command line (as a hex string).
+-2. The helper locks the block with `GlobalLock` and enters a polling loop.
+-3. For each operation, the 16-bit side fills the command fields in `IPC_PARAMS`, sets `cmdReady = 1`, then spin-waits with periodic `Yield()` calls.
+-4. The helper detects `cmdReady == 1`, dispatches the command (open/decode/close), writes the result, and clears `cmdReady = 0`.
+-5. The 16-bit side resumes. A 5000-iteration timeout with `IsWindow()` check guards against a crashed helper.
++2. The helper locks the block with `GlobalLock` and waits in `GetMessage`.
++3. For each operation, the 16-bit side fills the command fields in `IPC_PARAMS`, sets `cmdReady = 1`, posts `IPC_WM_WAKE` to the helper window, then calls `Yield()` until the command completes.
++4. The helper wakes, sees `cmdReady == 1`, dispatches the command (open/decode/close), writes the result, and clears `cmdReady = 0`.
++5. The 16-bit side resumes. A 2-second wall-clock timeout with an `IsWindow()` check guards against a crashed helper.
+ 
+ Compressed frame data and decoded output are passed through two
+ additional `GMEM_SHARE` buffers (`g_hSrcBuf` / `g_hDstBuf`) whose
+@@ -42,8 +42,54 @@ these independently per decode call.
+ 
+ The codec fully implements `ICM_DRAW_*` as required by MCIAVI on
+ Windows 3.1. After decoding each frame into the shared dst buffer,
+-`xvid16.dll` paints directly to the playback window using
+-`SetDIBitsToDevice` (when no scaling is needed) or `StretchDIBits`.
++`xvid16.dll` paints directly to the playback window.
++
++On a 16, 24 or 32 bpp display, `ICM_DRAW_BEGIN` creates a device
++bitmap and checks its pixel layout (RGB565, RGB555, BGR24 or BGRA32)
++by drawing known colours with `SetPixel` and reading them back with
++`GetBitmapBits`. If the layout matches, XviD decodes straight into
++that format and each frame is shown with `SetBitmapBits` + `BitBlt`,
++which avoids GDI converting every pixel. Otherwise (8 bpp, unknown
++layout) frames are 24-bit DIBs painted with `SetDIBitsToDevice` or
++`StretchDIBits`. The chosen path is logged with `debug=1`.
++
++On a 16 bpp screen this relies on the MMX RGB565/RGB555 converters
++added to the bundled xvidcore (see *Local xvidcore changes*); xvid's
++own C converter is too slow for it to pay off.
++
++Measured on 640x360 ~30 fps material (`DRAW_END` statistics):
++
++| Machine / screen | Path | Decode | Paint | Shown fps | Hurry-up |
++|---|---|---|---|---|---|
++| PIII, Matrox Mystique, 16 bpp | old 24-bit DIB | 13.1 ms | 21.9 ms | 19.2 | 20% |
++| PIII, Matrox Mystique, 16 bpp | RGB565, C converter | 24.2 ms | 12.5 ms | 13.9 | 40% |
++| PIII, Matrox Mystique, 16 bpp | RGB565, MMX converter | 12.6 ms | 12.7 ms | 28.8 | 0.1% |
++| EeePC, vbesvga, 16 bpp | RGB565, MMX converter | 5.4 ms | 2.3 ms | 29.3 | 0.6% |
++| EeePC, vbesvga, 32 bpp | BGRA32 | 6.4 ms | 5.0 ms | 29.4 | 1.7% |
++
++RGB555 and BGR24 device bitmaps have not been seen on real hardware
++yet.
++
++MCIAVI only uses draw mode when no DCI provider is active; with DCI it
++decompresses through `ICM_DECOMPRESS` and displays frames itself via
++DrawDib. On the Matrox Mystique, VfW 1.1's DrawDib-over-DCI path leaves
++windows and menus raised over the video unpainted until playback
++pauses. This is not caused by xvid16. Removing the `DCI=` line from
++`SYSTEM.INI` `[drivers]` avoids it, and the draw path above is faster
++there anyway.
++
++### Local xvidcore changes
++
++The bundled `xvidcore-1.3.7/` is not pristine. Keep these changes if
++xvidcore is ever replaced:
++
++- `src/image/x86_asm/colorspace_rgb_mmx.asm`: `yv12_to_rgb565_mmx` and
++  `yv12_to_rgb555_mmx`, built from the existing `YV12_TO_BGR` macro
++  with a 16-bit packing step (`YV12_TO_RGB16_ROW`). No dithering;
++  output is bit-exact with `yv12_to_bgr_mmx` truncated to 5/6/5 or
++  5/5/5 bits.
++- `src/image/colorspace.h`, `src/xvid.c`: declare the two functions
++  and select them when MMX is available.
+ 
+ ## Files
+ 
+@@ -51,8 +97,8 @@ Windows 3.1. After decoding each frame into the shared dst buffer,
+ |---------------|-------------------------------------------------------------------|
+ | `codec16.h`   | Shared header: `IPC_PARAMS`, ICM message/flag/struct definitions, FOURCC constants, CSP constants |
+ | `codec16.c`   | 16-bit VFW installable codec. Implements `LibMain`/`WEP`, `DriverProc`, all ICM handlers, helper process lifetime, and draw-mode painting |
+-| `xvidhlp.c`   | 32-bit Win32s helper process. Polls shared memory for commands, drives `xvid_decore()`, wraps decode in SEH to survive corrupt streams |
+-| `xvidcore-1.3.7/` | XviD 1.3.7 source tree (provides `xvid.h` and `xvidcore.lib`) |
++| `xvidhlp.c`   | 32-bit Win32s helper process. Waits for `IPC_WM_WAKE`, runs commands from shared memory, drives `xvid_decore()`, wraps decode in SEH to survive corrupt streams |
++| `xvidcore-1.3.7/` | XviD 1.3.7 source tree (provides `xvid.h` and `xvidcore.lib`), with local MMX RGB565/555 output added |
+ 
+ ### codec16.h
+ 
+@@ -77,7 +123,7 @@ The `DriverProc` entry point dispatches VFW messages:
+ | `ICM_DECOMPRESS` / `ICM_DECOMPRESSEX` | Copies compressed data to shared src buffer, sends `IPC_CMD_DECODE`, copies decoded output from shared dst buffer |
+ | `ICM_DECOMPRESS_END` | Sends `IPC_CMD_CLOSE` to helper |
+ | `ICM_DRAW_BEGIN` | Allocates shared buffers, opens XviD decoder, records window/rect state |
+-| `ICM_DRAW` | Decodes frame via helper, paints to window with `SetDIBitsToDevice` or `StretchDIBits` |
++| `ICM_DRAW` | Decodes frame via helper, paints to window from the device bitmap or with `SetDIBitsToDevice`/`StretchDIBits` |
+ | `ICM_DRAW_UPDATE` | Repaints last decoded frame (e.g. after window uncover) |
+ | `ICM_DRAW_WINDOW` | Updates destination rectangle |
+ | `ICM_DRAW_END` | Closes XviD decoder, clears draw state |
+@@ -92,9 +138,11 @@ called from `WEP` on DLL unload, setting `quit = 1` in shared memory.
+ A minimal Win32 application with a hidden window (`"XviDHelper"`)
+ that `FindWindow` in the 16-bit DLL uses to confirm the helper is alive.
+ 
+-Main loop spin-checks `cmdReady` up to 1000 times before calling
+-`Sleep(1)` to avoid burning a full 55 ms timer tick on Win32s for
+-every idle iteration.
++Main loop runs any pending command, then blocks in `GetMessage` until
++the DLL posts `IPC_WM_WAKE`. The helper must not poll: a polling task
++is always runnable, takes every `Yield()`, and on a CPU-bound machine
++keeps other apps from ever repainting (menus and windows raised over
++the video stayed frozen).
+ 
+ Command handlers:
+ 
+@@ -106,7 +154,7 @@ Command handlers:
+ 
+ The SEH wrapper means a corrupt stream or internal XviD crash drops
+ only the affected frame rather than killing the helper and stalling
+-the 16-bit side on the 5000-iteration timeout.
++the 16-bit side on the 2-second timeout.
+ 
+ ## Supported FOURCCs
+ 
+@@ -137,7 +185,7 @@ ORed into the color-space value to let XviD handle the vertical flip.
+ 
+ ### Runtime
+ - Windows 3.1 or Windows 3.11 for Workgroups
+-- Win32s (Tested on 1.30c) required to run the 32-bit helper process
++- Win32s 1.30c or later - required to run the 32-bit helper process
+ - Video for Windows 1.1e runtime
+ 
+ ### Build
+@@ -198,26 +246,9 @@ MPEG-4 video in AVI containers can now be played with Windows Media Player.
+ - **Decode only.** Encoding is not supported (`ICERR_UNSUPPORTED`).
+ - **No palette output.** 8-bit paletted output is not implemented.
+ - **Single-threaded cooperative.** Win32s is cooperative; each frame
+-  decode spin-waits on shared memory while yielding to the message
+-  loop. A fast computer is recommended for smooth playback (Pentium III
++  decode waits on shared memory while yielding to other tasks. A fast computer is recommended for smooth playback (Pentium III
+   or better for real-time; Pentium II will work but may drop frames).
+ - **Memory.** XviD needs ~1 MB per open decoder instance plus frame
+   buffers. Win32s memory is limited by available extended memory.
+   (takes about 8MiB for a 640x360 video)
+ - **Up to 8 concurrent decoder instances**
+-- Even with the patched `MCIAVI.DRV` There are limitations concerning the AVI files that can be played.
+-
+-  Notably, ffmpeg doesn't generates correct headers for AVI files containing MPEG4 ASP, and `MCIAVI.DRV` doesn't like audio packets with variable sizes.
+-
+-  There's also an error in headers calculations for MSADCPM.
+-
+-  You have two options:
+-
+-  Either:
+-
+-  - If using MP3 audio, run `fix_avi.py` on AVI files and additionnaly `fix_padding.py` if using a sample rate other than 48Khz (theses scripts are in the `mp3acm` directory in this repo).
+-  - If using ADCPM audio, run `fixadpcm.py` on AVI files.
+-
+-  Or:
+-
+-  - Patch ffmpeg with the patches provided in the `ffmpeg` directory in this repo.
+diff --git a/xvid16/codec16.c b/xvid16/codec16.c
+index 3e62d7e..0e6b59d 100644
+--- a/xvid16/codec16.c
++++ b/xvid16/codec16.c
+@@ -27,12 +27,14 @@
+ #include "codec16.h"
+ 
+ /* ------------------------------------------------------------------ */
+-/*  Helper process IPC (Win32s - HGLOBAL shared memory + polling)       */
++/*  Helper process IPC (Win32s - HGLOBAL shared memory + wake message)  */
+ /*                                                                      */
+ /*  Architecture:                                                       */
+ /*    xvid16.dll (16-bit) --- GMEM_SHARE IPC_PARAMS ---> xvidhlp.exe   */
+-/*    16-bit side fills IPC_PARAMS, sets cmdReady=1, spin-waits.        */
+-/*    xvidhlp.exe polls cmdReady, dispatches to XviD, clears cmdReady.  */
++/*    16-bit side fills IPC_PARAMS, sets cmdReady=1, posts IPC_WM_WAKE, */
++/*    then Yield()s until cmdReady is cleared.                          */
++/*    xvidhlp.exe wakes from GetMessage, dispatches to XviD, clears     */
++/*    cmdReady.                                                         */
+ /* ------------------------------------------------------------------ */
+ 
+ /* ------------------------------------------------------------------ */
+@@ -237,6 +239,11 @@ static BOOL InitIPC(void)
+ 
+     /* A helper left over from a previous load would answer FindWindow
+      * below while polling a different (stale) shared block. */
++    {
++        char szMod[128];
++        GetModuleFileName(g_hInstance, szMod, sizeof(szMod));
++        DbgLog("InitIPC: %s built " __DATE__ " " __TIME__, (LPSTR)szMod);
++    }
+     DbgLog("InitIPC: hShared=%04X, existing helper hwnd=%04X",
+            (WORD)g_hSharedMem, (WORD)FindWindow("XviDHelper", NULL));
+ 
+@@ -274,6 +281,8 @@ static void TermIPC(void)
+     /* Tell helper to quit */
+     if (g_pShared) {
+         g_pShared->quit = 1;
++        if (g_hwndHelper && IsWindow(g_hwndHelper))
++            PostMessage(g_hwndHelper, IPC_WM_WAKE, 0, 0L);
+         Yield();
+     }
+     g_hwndHelper = NULL;
+@@ -329,28 +338,22 @@ static BOOL EnsureBuffers(DWORD cbSrc, DWORD cbDst)
+ /* ------------------------------------------------------------------ */
+ static DWORD CallHelper(void)
+ {
+-    int spin;
+     DWORD t0;
+ 
+     if (!g_pShared)
+         return (DWORD)ICERR_INTERNAL;
+ 
+-    /* Signal command ready and wait for helper to process it */
++    /* Signal command ready, wake the helper and wait for it. Scheduling
++     * is cooperative, so the helper only runs while we Yield(); spinning
++     * on cmdReady without yielding could never see it change. */
+     t0 = GetTickCount();
+     g_pShared->cmdReady = 1;
++    if (g_hwndHelper)
++        PostMessage(g_hwndHelper, IPC_WM_WAKE, 0, 0L);
+ 
+-    /* Timeout is wall-clock, not an iteration count: the helper may be
+-     * blocked in Sleep(1) for a full 55 ms timer tick, during which our
+-     * Yield() won't schedule it. On a fast CPU an iteration-based limit
+-     * can expire before the helper ever wakes up. */
++    /* Timeout is wall-clock, not an iteration count: on a fast CPU an
++     * iteration-based limit can expire before the helper is scheduled. */
+     for (;;) {
+-        /* Spin briefly before yielding — the 32-bit side often
+-         * completes in microseconds, so avoid the full task-switch
+-         * cost of Yield() when possible. */
+-        for (spin = 0; spin < 100; spin++) {
+-            if (!g_pShared->cmdReady)
+-                return g_pShared->result;
+-        }
+         Yield();
+         if (!g_pShared->cmdReady)
+             return g_pShared->result;
+@@ -537,9 +540,23 @@ static LRESULT icm_DecompressBegin(CODEC_INSTANCE FAR *pInst,
+     return ICERR_OK;
+ }
+ 
++/* Log and reset playback statistics (debug=1) */
++static void LogStats(CODEC_INSTANCE FAR *pInst, LPCSTR where)
++{
++    if (!pInst->nFrames) return;
++    DbgLog("%s: %u frames (%u hurry-up/preroll) in %lu ms, "
++           "decode %lu ms, paint %lu ms", where,
++           pInst->nFrames, pInst->nSkipped,
++           timeGetTime() - pInst->tStart,
++           pInst->msDecode, pInst->msPaint);
++    pInst->nFrames = pInst->nSkipped = 0;
++    pInst->msDecode = pInst->msPaint = 0;
++}
++
+ /* ICM_DECOMPRESS_END */
+ static LRESULT icm_DecompressEnd(CODEC_INSTANCE FAR *pInst)
+ {
++    LogStats(pInst, "DECOMPRESS_END");
+     if (pInst->hXvidHandle && g_bWin32s) {
+         g_pShared->cmd    = IPC_CMD_CLOSE;
+         g_pShared->handle = pInst->hXvidHandle;
+@@ -558,7 +575,9 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
+                                LPVOID lpDst)
+ {
+     DWORD csp;
+-    DWORD rc;
++    DWORD rc, t;
++    BOOL bNoOutput = (dwFlags & (ICDECOMPRESS_HURRYUP |
++                                 ICDECOMPRESS_PREROLL)) != 0;
+ 
+     if (!pInst->hXvidHandle) return ICERR_INTERNAL;
+ 
+@@ -568,6 +587,10 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
+     csp = BitmapToCSP(lpbiDst);
+     if (!csp) return ICERR_BADFORMAT;
+ 
++    if (pInst->nFrames == 0) pInst->tStart = timeGetTime();
++    pInst->nFrames++;
++    if (bNoOutput) pInst->nSkipped++;
++
+     {
+         DWORD dstBytes  = DibImageSize(lpbiDst);
+         LONG  h = lpbiDst->biHeight < 0 ? -lpbiDst->biHeight : lpbiDst->biHeight;
+@@ -584,17 +607,21 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
+         g_pShared->srcSize   = lpbiSrc->biSizeImage;
+         g_pShared->dstStride = dstStride;
+         g_pShared->dstSize   = dstBytes;
+-        g_pShared->dstFormat = (LONG)csp;
++        /* A hurry-up/preroll frame won't be shown, so the caller needs
++         * no output: only decode to keep the reference pictures. */
++        g_pShared->dstFormat = bNoOutput ? (LONG)XVID_CSP_NULL : (LONG)csp;
+ 
+         /* Copy compressed data into shared src buffer */
+         hmemcpy(g_lpSrcBuf, lpSrc, lpbiSrc->biSizeImage);
+         g_pShared->hSrcMem   = (DWORD)(WORD)g_hSrcBuf;
+         g_pShared->hDstMem   = (DWORD)(WORD)g_hDstBuf;
+ 
++        t = timeGetTime();
+         rc = CallHelper();
++        pInst->msDecode += timeGetTime() - t;
+ 
+         /* Copy decoded output back */
+-        if (rc == (DWORD)ICERR_OK && g_lpDstBuf)
++        if (rc == (DWORD)ICERR_OK && g_lpDstBuf && !bNoOutput)
+             hmemcpy(lpDst, g_lpDstBuf, dstBytes);
+     }
+     return (rc == (DWORD)ICERR_OK) ? ICERR_OK : ICERR_ERROR;
+@@ -621,6 +648,144 @@ static LRESULT icm_DecompressEx(CODEC_INSTANCE FAR *pInst,
+ 
+ static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst); /* forward */
+ 
++static void FreeFrameBitmap(CODEC_INSTANCE FAR *pInst)
++{
++    if (pInst->hbmFrame) {
++        DeleteObject(pInst->hbmFrame);
++        pInst->hbmFrame = NULL;
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/*  Set up the fast paint path. GDI converts our 24-bit DIB to the     */
++/*  screen format on every frame, which costs more than decoding on a  */
++/*  16 bpp Matrox. Instead, have XviD write pixels in the display's    */
++/*  own format and blit them from a device bitmap. Win3.x leaves the   */
++/*  device bitmap layout to the display driver, so verify it: paint    */
++/*  known colours with SetPixel, read the raw bits back, and only use  */
++/*  the fast path if they match a format XviD can produce. The last    */
++/*  pixel is checked too, which catches rows padded to 64K segment     */
++/*  boundaries. On any mismatch we keep the 24-bit DIB path.           */
++/* ------------------------------------------------------------------ */
++static BOOL PixelIs(BYTE __huge *p, int bpp, DWORD c16, BYTE b, BYTE g, BYTE r)
++{
++    if (bpp == 16)
++        return ((WORD)p[0] | ((WORD)p[1] << 8)) == (WORD)c16;
++    return p[0] == b && p[1] == g && p[2] == r;
++}
++
++static void SetupFrameBitmap(CODEC_INSTANCE FAR *pInst, HDC hdc)
++{
++    int w = pInst->width, h = pInst->height;
++    int bpp, Bpp;
++    BITMAP bm;
++    HBITMAP hbm, hbmOld;
++    HDC hdcMem;
++    DWORD cb, csp = 0;
++    BYTE __huge *p;
++    BYTE __huge *pLast;
++
++    FreeFrameBitmap(pInst);
++    if (!hdc || w < 3 || h < 1) return;
++
++    bpp = GetDeviceCaps(hdc, BITSPIXEL) * GetDeviceCaps(hdc, PLANES);
++    if (GetDeviceCaps(hdc, PLANES) != 1 ||
++        (bpp != 16 && bpp != 24 && bpp != 32)) {
++        DbgLog("DRAW_BEGIN: screen %d bpp, using 24-bit DIB", bpp);
++        return;
++    }
++    Bpp = bpp / 8;
++
++    hbm = CreateCompatibleBitmap(hdc, w, h);
++    if (!hbm) goto fail;
++    GetObject(hbm, sizeof(bm), &bm);
++    if (bm.bmPlanes != 1 || bm.bmBitsPixel != bpp ||
++        (DWORD)bm.bmWidthBytes < (DWORD)w * Bpp)
++        goto fail;
++    cb = (DWORD)bm.bmWidthBytes * (DWORD)h;
++    if (!EnsureBuffers(SRC_BUF_MIN, cb)) goto fail;
++
++    hdcMem = CreateCompatibleDC(hdc);
++    if (!hdcMem) goto fail;
++    hbmOld = SelectObject(hdcMem, hbm);
++    PatBlt(hdcMem, 0, 0, w, h, BLACKNESS);
++    SetPixel(hdcMem, 0, 0, RGB(255, 0, 0));
++    SetPixel(hdcMem, 1, 0, RGB(0, 255, 0));
++    SetPixel(hdcMem, 2, 0, RGB(0, 0, 255));
++    SetPixel(hdcMem, w - 1, h - 1, RGB(255, 0, 0));
++    SelectObject(hdcMem, hbmOld);
++    DeleteDC(hdcMem);
++
++    if (GetBitmapBits(hbm, (LONG)cb, g_lpDstBuf) != (LONG)cb) goto fail;
++    p = (BYTE __huge *)g_lpDstBuf;
++    pLast = p + (DWORD)(h - 1) * bm.bmWidthBytes + (DWORD)(w - 1) * Bpp;
++
++    if (bpp == 16) {
++        if (PixelIs(p, 16, 0xF800, 0, 0, 0) &&
++            PixelIs(p + 2, 16, 0x07E0, 0, 0, 0) &&
++            PixelIs(p + 4, 16, 0x001F, 0, 0, 0) &&
++            PixelIs(pLast, 16, 0xF800, 0, 0, 0))
++            csp = XVID_CSP_RGB565;
++        else if (PixelIs(p, 16, 0x7C00, 0, 0, 0) &&
++                 PixelIs(p + 2, 16, 0x03E0, 0, 0, 0) &&
++                 PixelIs(p + 4, 16, 0x001F, 0, 0, 0) &&
++                 PixelIs(pLast, 16, 0x7C00, 0, 0, 0))
++            csp = XVID_CSP_RGB555;
++    } else if (PixelIs(p, bpp, 0, 0x00, 0x00, 0xFF) &&
++               PixelIs(p + Bpp, bpp, 0, 0x00, 0xFF, 0x00) &&
++               PixelIs(p + 2 * Bpp, bpp, 0, 0xFF, 0x00, 0x00) &&
++               PixelIs(pLast, bpp, 0, 0x00, 0x00, 0xFF)) {
++        csp = (bpp == 24) ? XVID_CSP_BGR : XVID_CSP_BGRA;
++    }
++    if (!csp) {
++        DbgLog("DRAW_BEGIN: screen %d bpp, unknown bitmap layout "
++               "(%02X %02X %02X %02X %02X %02X), using 24-bit DIB", bpp,
++               p[0], p[1], p[2], p[3], p[4], p[5]);
++        DeleteObject(hbm);
++        return;
++    }
++
++    pInst->hbmFrame    = hbm;
++    pInst->cspFrame    = csp;
++    pInst->strideFrame = (DWORD)bm.bmWidthBytes;
++    pInst->cbFrame     = cb;
++    DbgLog("DRAW_BEGIN: screen %d bpp, device bitmap %s, %u bytes/row", bpp,
++           (LPSTR)(csp == XVID_CSP_RGB565 ? "RGB565" :
++                   csp == XVID_CSP_RGB555 ? "RGB555" :
++                   csp == XVID_CSP_BGR    ? "BGR24"  : "BGRA32"),
++           bm.bmWidthBytes);
++    return;
++
++fail:
++    if (hbm) DeleteObject(hbm);
++    DbgLog("DRAW_BEGIN: screen %d bpp, device bitmap unavailable, "
++           "using 24-bit DIB", bpp);
++}
++
++/* Fast path: device bitmap already in screen format, copy and blit */
++static void PaintFrameBitmap(CODEC_INSTANCE FAR *pInst, HDC hdc,
++                             int xDst, int yDst, int dxDst, int dyDst,
++                             int xSrc, int ySrc, int dxSrc, int dySrc)
++{
++    HDC hdcMem;
++    HBITMAP hbmOld;
++
++    SetBitmapBits(pInst->hbmFrame, pInst->cbFrame, g_lpDstBuf);
++    hdcMem = CreateCompatibleDC(hdc);
++    if (!hdcMem) return;
++    hbmOld = SelectObject(hdcMem, pInst->hbmFrame);
++    /* The bitmap is top-down, so the source rect is used as is */
++    if (dxDst == dxSrc && dyDst == dySrc) {
++        BitBlt(hdc, xDst, yDst, dxDst, dyDst, hdcMem, xSrc, ySrc, SRCCOPY);
++    } else {
++        SetStretchBltMode(hdc, COLORONCOLOR);
++        StretchBlt(hdc, xDst, yDst, dxDst, dyDst,
++                   hdcMem, xSrc, ySrc, dxSrc, dySrc, SRCCOPY);
++    }
++    SelectObject(hdcMem, hbmOld);
++    DeleteDC(hdcMem);
++}
++
+ /* ------------------------------------------------------------------ */
+ /*  Paint the last decoded frame into the ICM_DRAW_BEGIN destination.  */
+ /*  Per ICDrawBegin: the destination rect is relative to the window or */
+@@ -662,8 +827,11 @@ static void PaintFrame(CODEC_INSTANCE FAR *pInst)
+         dxSrc = w; dySrc = h;
+     }
+ 
+-    if (xSrc == 0 && ySrc == 0 && dxSrc == w && dySrc == h &&
+-        dxDst == w && dyDst == h) {
++    if (pInst->hbmFrame) {
++        PaintFrameBitmap(pInst, hdc, xDst, yDst, dxDst, dyDst,
++                         xSrc, ySrc, dxSrc, dySrc);
++    } else if (xSrc == 0 && ySrc == 0 && dxSrc == w && dySrc == h &&
++               dxDst == w && dyDst == h) {
+         /* 1:1 full frame: SetDIBitsToDevice bypasses the stretch
+          * engine and is significantly faster. */
+         SetDIBitsToDevice(hdc,
+@@ -784,6 +952,13 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
+     pInst->biDraw.biCompression = BI_RGB;
+     pInst->biDraw.biSizeImage   = dibSize;
+ 
++    /* Pick the fast paint path if the display allows it */
++    {
++        HDC hdc = pDB->hwnd ? GetDC(pDB->hwnd) : pDB->hdc;
++        SetupFrameBitmap(pInst, hdc);
++        if (pDB->hwnd && hdc) ReleaseDC(pDB->hwnd, hdc);
++    }
++
+     return ICERR_OK;
+ }
+ 
+@@ -791,11 +966,17 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
+ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
+                               ICDRAW FAR *pDraw)
+ {
+-    DWORD rc, stride;
++    DWORD rc, stride, csp, t;
++    BOOL bNoPaint = (pDraw->dwFlags & (ICDRAW_HURRYUP | ICDRAW_PREROLL)) != 0;
+ 
+     /* UPDATE flag: repaint last frame without decoding */
+     if (pDraw->dwFlags & ICDRAW_UPDATE) goto paint;
+ 
++    /* Statistics: how far behind MCIAVI is and where the time goes */
++    if (pInst->nFrames == 0) pInst->tStart = timeGetTime();
++    pInst->nFrames++;
++    if (bNoPaint) pInst->nSkipped++;
++
+     /* Null frame - nothing to draw */
+     if (pDraw->dwFlags & ICDRAW_NULLFRAME) return ICERR_OK;
+ 
+@@ -804,7 +985,14 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
+ 
+     /* Decode via helper (if decoder is available) */
+     if (pInst->hXvidHandle && g_hwndHelper && g_pShared) {
+-        stride = (DWORD)(((DWORD)pInst->width * 24 + 31) / 32) * 4;
++        /* Device bitmap: top-down, display format. DIB: bottom-up BGR. */
++        if (pInst->hbmFrame) {
++            stride = pInst->strideFrame;
++            csp    = pInst->cspFrame;
++        } else {
++            stride = (DWORD)(((DWORD)pInst->width * 24 + 31) / 32) * 4;
++            csp    = XVID_CSP_BGR | XVID_CSP_VFLIP;
++        }
+ 
+         g_pShared->cmd       = IPC_CMD_DECODE;
+         g_pShared->handle    = pInst->hXvidHandle;
+@@ -812,7 +1000,10 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
+         g_pShared->srcSize   = pDraw->cbData;
+         g_pShared->dstStride = stride;
+         g_pShared->dstSize   = stride * (DWORD)pInst->height;
+-        g_pShared->dstFormat = (LONG)(XVID_CSP_BGR | XVID_CSP_VFLIP);
++        /* Frames that won't be drawn only need decoding to keep the
++         * reference pictures current; skip the RGB conversion, which
++         * helps a CPU-bound machine catch up. */
++        g_pShared->dstFormat = bNoPaint ? (LONG)XVID_CSP_NULL : (LONG)csp;
+ 
+         /* Copy compressed data into shared src buffer, growing it for
+          * an unusually large frame; skip the decode if that fails
+@@ -822,24 +1013,29 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
+             g_pShared->hSrcMem = (DWORD)(WORD)g_hSrcBuf;
+             g_pShared->hDstMem = (DWORD)(WORD)g_hDstBuf;
+ 
++            t = timeGetTime();
+             rc = CallHelper();
++            pInst->msDecode += timeGetTime() - t;
+             (void)rc;
+         }
+     }
+ 
+     /* Skip painting if hurry-up (decode only for reference frames) */
+-    if (pDraw->dwFlags & ICDRAW_HURRYUP) return ICERR_OK;
+-    if (pDraw->dwFlags & ICDRAW_PREROLL) return ICERR_OK;
++    if (bNoPaint) return ICERR_OK;
+ 
+     /* Paint the decoded frame to the window */
+ paint:
++    t = timeGetTime();
+     PaintFrame(pInst);
++    pInst->msPaint += timeGetTime() - t;
+     return ICERR_OK;
+ }
+ 
+ /* ICM_DRAW_END */
+ static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst)
+ {
++    LogStats(pInst, "DRAW_END");
++
+     /* Close XviD decoder */
+     if (pInst->hXvidHandle && g_bWin32s && g_pShared) {
+         g_pShared->cmd    = IPC_CMD_CLOSE;
+@@ -848,6 +1044,7 @@ static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst)
+         pInst->hXvidHandle = 0;
+     }
+ 
++    FreeFrameBitmap(pInst);
+     pInst->hwndDraw = NULL;
+     return ICERR_OK;
+ }
+@@ -890,7 +1087,7 @@ LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
+     case DRV_CLOSE:
+         if (pInst) {
+             /* Clean up both decompress and draw state */
+-            if (pInst->hwndDraw)
++            if (pInst->hwndDraw || pInst->hbmFrame)
+                 icm_DrawEnd(pInst);
+             else
+                 icm_DecompressEnd(pInst);
+diff --git a/xvid16/codec16.h b/xvid16/codec16.h
+index f7e87ab..f1ea3d6 100644
+--- a/xvid16/codec16.h
++++ b/xvid16/codec16.h
+@@ -102,6 +102,11 @@
+ #define ICERR_BADBITDEPTH           (-200L)
+ #define ICERR_BADIMAGESIZE          (-201L)
+ 
++/* Not in the Win16 SDK headers (introduced with Win32/Win95) */
++#ifndef BI_BITFIELDS
++#define BI_BITFIELDS                3L
++#endif
++
+ /* ICM flags */
+ #define ICDECOMPRESS_NOSKIP         0x0001
+ #define ICDECOMPRESS_HURRYUP        0x0002
+@@ -215,10 +220,25 @@ typedef struct {
+     int         width;
+     int         height;
+     DWORD       hXvidHandle;    /* Handle returned by 32-bit side */
+-    /* Draw mode state */
++    /* Draw mode state (from ICM_DRAW_BEGIN) */
+     HWND        hwndDraw;
+-    short       xDst, yDst, dxDst, dyDst;
++    HDC         hdcDraw;        /* only used when hwndDraw is NULL */
++    short       xDst, yDst, dxDst, dyDst;   /* relative to window/DC */
++    short       xSrc, ySrc, dxSrc, dySrc;   /* relative to full frame */
++    BOOL        bDrawOff;       /* ICM_DRAW_WINDOW sent an empty rect */
+     BITMAPINFOHEADER biDraw;    /* Output format for StretchDIBits */
++    /* Fast path: frame decoded straight into the display's own pixel
++     * format and blitted from a device bitmap (NULL = 24-bit DIB path) */
++    HBITMAP     hbmFrame;
++    DWORD       cspFrame;       /* XviD output format matching hbmFrame */
++    DWORD       strideFrame;    /* bytes per row of hbmFrame */
++    DWORD       cbFrame;        /* total bytes of hbmFrame */
++    /* Playback statistics, logged at ICM_DRAW_END / ICM_DECOMPRESS_END */
++    DWORD       tStart;         /* timeGetTime() of the first frame */
++    DWORD       msDecode;       /* time spent waiting for the helper */
++    DWORD       msPaint;        /* time spent in PaintFrame (draw mode) */
++    WORD        nFrames;        /* frames decoded */
++    WORD        nSkipped;       /* ... of which hurry-up/preroll */
+ } CODEC_INSTANCE;
+ 
+ /* Shared memory block for 16<->32 IPC communication.
+@@ -252,6 +272,11 @@ typedef struct {
+ #define IPC_CMD_CLOSE     2
+ #define IPC_CMD_DECODE    3
+ 
++/* Posted to the helper window after setting cmdReady or quit. The helper
++ * sleeps in GetMessage between commands so that it is not runnable while
++ * idle; a polling helper would take every Yield() and starve other apps. */
++#define IPC_WM_WAKE       (WM_USER + 0x100)
++
+ /* Output color format - must match XviD CSP values from xvid.h exactly.
+  * Guarded so that including xvid.h before this header doesn't cause
+  * "not identical definition" warnings. */
+@@ -267,9 +292,15 @@ typedef struct {
+ #ifndef XVID_CSP_RGBA
+ #define XVID_CSP_RGBA       (1UL<<8)   /* 32-bit RGBA   */
+ #endif
++#ifndef XVID_CSP_BGRA
++#define XVID_CSP_BGRA       (1UL<<6)   /* 32-bit BGRA (Windows DIB order) */
++#endif
+ #ifndef XVID_CSP_YV12
+ #define XVID_CSP_YV12       (1UL<<2)   /* YV12 planar   */
+ #endif
++#ifndef XVID_CSP_NULL
++#define XVID_CSP_NULL       (1UL<<14)  /* decode only, no output */
++#endif
+ #ifndef XVID_CSP_VFLIP
+ #define XVID_CSP_VFLIP      (1UL<<31)  /* vertical flip */
+ #endif
+diff --git a/xvid16/xvidcore-1.3.7/src/image/colorspace.h b/xvid16/xvidcore-1.3.7/src/image/colorspace.h
+index ef178fc..669b220 100644
+--- a/xvid16/xvidcore-1.3.7/src/image/colorspace.h
++++ b/xvid16/xvidcore-1.3.7/src/image/colorspace.h
+@@ -176,6 +176,8 @@ packedFunc yv12_to_uyvyi_c;
+ /* mmx */
+ packedFunc yv12_to_bgr_mmx;
+ packedFunc yv12_to_bgra_mmx;
++packedFunc yv12_to_rgb565_mmx;
++packedFunc yv12_to_rgb555_mmx;
+ packedFunc yv12_to_yuyv_mmx;
+ packedFunc yv12_to_uyvy_mmx;
+ 
+diff --git a/xvid16/xvidcore-1.3.7/src/image/x86_asm/colorspace_rgb_mmx.asm b/xvid16/xvidcore-1.3.7/src/image/x86_asm/colorspace_rgb_mmx.asm
+index c4163a0..279d7a9 100644
+--- a/xvid16/xvidcore-1.3.7/src/image/x86_asm/colorspace_rgb_mmx.asm
++++ b/xvid16/xvidcore-1.3.7/src/image/x86_asm/colorspace_rgb_mmx.asm
+@@ -97,6 +97,15 @@ VR_MUL: dw 102, 102, 102, 102
+ 
+ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
+ 
++;-----------------------------------------------------------------------------
++; YV12->RGB565/RGB555 packing masks
++;-----------------------------------------------------------------------------
++
++R565_MASK: dw 0xF800, 0xF800, 0xF800, 0xF800
++G565_MASK: dw 0x00FC, 0x00FC, 0x00FC, 0x00FC
++R555_MASK: dw 0x7C00, 0x7C00, 0x7C00, 0x7C00
++G555_MASK: dw 0x00F8, 0x00F8, 0x00F8, 0x00F8
++
+ ;=============================================================================
+ ; Helper macros used with the colorspace_mmx.inc file
+ ;=============================================================================
+@@ -319,11 +328,64 @@ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
+ %endmacro
+ 
+ ;------------------------------------------------------------------------------
+-; YV12_TO_BGR( BYTES )
++; YV12_TO_RGB16_ROW( R, G, B, DST, IS555 )
++;
++; Packs one row of 8 pixels to 16-bit RGB and stores 16 bytes at DST.
++; R is an mm register (not mm0-mm3) with r7..r0 bytes, G and B are memory
++; operands with g7..g0 / b7..b0 bytes; mm7 must be zero.
++; Matches the C MK_RGB565/MK_RGB555 bit layout, without dithering.
++;------------------------------------------------------------------------------
++
++%macro YV12_TO_RGB16_ROW	5
++  movq mm0, %3              ; b7..b0
++  movq mm1, mm0
++  punpcklbw mm0, mm7        ; b3..b0 words
++  punpckhbw mm1, mm7        ; b7..b4 words
++  psrlw mm0, 3
++  psrlw mm1, 3
++  movq mm2, %2              ; g7..g0
++  movq mm3, mm2
++  punpcklbw mm2, mm7        ; g3..g0 words
++  punpckhbw mm3, mm7        ; g7..g4 words
++%if %5
++  pand mm2, [G555_MASK]
++  pand mm3, [G555_MASK]
++  psllw mm2, 2
++  psllw mm3, 2
++%else
++  pand mm2, [G565_MASK]
++  pand mm3, [G565_MASK]
++  psllw mm2, 3
++  psllw mm3, 3
++%endif
++  por mm0, mm2
++  por mm1, mm3
++  movq mm2, mm7
++  movq mm3, mm7
++  punpcklbw mm2, %1         ; r3..r0 in high bytes
++  punpckhbw mm3, %1         ; r7..r4 in high bytes
++%if %5
++  psrlw mm2, 1
++  psrlw mm3, 1
++  pand mm2, [R555_MASK]
++  pand mm3, [R555_MASK]
++%else
++  pand mm2, [R565_MASK]
++  pand mm3, [R565_MASK]
++%endif
++  por mm0, mm2
++  por mm1, mm3
++  movq [%4], mm0
++  movq [%4 + 8], mm1
++%endmacro
++
++;------------------------------------------------------------------------------
++; YV12_TO_BGR( BYTES, IS555 )
+ ;
+-; BYTES		3=bgr(24-bit), 4=bgra(32-bit)
++; BYTES		2=rgb565/rgb555(16-bit), 3=bgr(24-bit), 4=bgra(32-bit)
++; IS555		for BYTES=2: 0=rgb565, 1=rgb555
+ ;
+-; bytes=3/4, pixels = 8, vpixels=2
++; bytes=2/3/4, pixels = 8, vpixels=2
+ ;------------------------------------------------------------------------------
+ 
+ %macro YV12_TO_BGR_INIT		2
+@@ -424,6 +486,12 @@ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
+   psraw mm6, SCALEBITS_OUT
+   psraw mm4, SCALEBITS_OUT
+   packuswb mm4, mm6         ; r7r6r5r4r3r2r1r0 -> mm4 (TEMP_R1)
++%if %1 == 2     ; RGB565/RGB555 (16-bit)
++  movq mm6, mm7             ; TEMP_R2 -> mm6
++  pxor mm7, mm7
++  YV12_TO_RGB16_ROW mm4, [TEMP_G1], [TEMP_B1], x_ptr, %2
++  YV12_TO_RGB16_ROW mm6, [TEMP_G2], [TEMP_B2], x_ptr + x_stride, %2
++%else
+   movq mm0, [TEMP_B1]
+   movq mm1, [TEMP_G1]
+   movq mm6, mm7
+@@ -516,6 +584,7 @@ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
+   movq [x_ptr + x_stride + 16], mm0
+   movq [x_ptr + x_stride + 24], mm5
+ %endif
++%endif
+ 
+ %undef TEMP_Y1
+ %undef TEMP_Y2
+@@ -542,5 +611,7 @@ MAKE_COLORSPACE  rgba_to_yv12_mmx,0,   4,2,2,  RGB_TO_YV12,  4, -1
+ ; output
+ MAKE_COLORSPACE  yv12_to_bgr_mmx,48,   3,8,2,  YV12_TO_BGR,  3, -1
+ MAKE_COLORSPACE  yv12_to_bgra_mmx,48,  4,8,2,  YV12_TO_BGR,  4, -1
++MAKE_COLORSPACE  yv12_to_rgb565_mmx,48, 2,8,2,  YV12_TO_BGR,  2, 0
++MAKE_COLORSPACE  yv12_to_rgb555_mmx,48, 2,8,2,  YV12_TO_BGR,  2, 1
+ 
+ NON_EXEC_STACK
+diff --git a/xvid16/xvidcore-1.3.7/src/xvid.c b/xvid16/xvidcore-1.3.7/src/xvid.c
+index 83ad35a..796d3f5 100644
+--- a/xvid16/xvidcore-1.3.7/src/xvid.c
++++ b/xvid16/xvidcore-1.3.7/src/xvid.c
+@@ -429,6 +429,8 @@ int xvid_gbl_init(xvid_gbl_init_t * init)
+ 		/* image output yv12_to_xxx related functions */
+ 		yv12_to_bgr   = yv12_to_bgr_mmx;
+ 		yv12_to_bgra  = yv12_to_bgra_mmx;
++		yv12_to_rgb565 = yv12_to_rgb565_mmx;
++		yv12_to_rgb555 = yv12_to_rgb555_mmx;
+ 		yv12_to_yuyv  = yv12_to_yuyv_mmx;
+ 		yv12_to_uyvy  = yv12_to_uyvy_mmx;
+ 
+diff --git a/xvid16/xvidhlp.c b/xvid16/xvidhlp.c
+index 5c5d10c..b6d4ebf 100644
+--- a/xvid16/xvidhlp.c
++++ b/xvid16/xvidhlp.c
+@@ -3,12 +3,12 @@
+  *
+  * The 16-bit VFW codec (xvid16.dll) launches this helper with the
+  * HGLOBAL handle of a GMEM_SHARE IPC_PARAMS block on the command line.
+- * The helper GlobalLock's it and polls the cmdReady flag.
++ * The helper GlobalLock's it and waits in GetMessage for IPC_WM_WAKE.
+  *
+  * Protocol:
+- *   16-bit side fills IPC_PARAMS, sets cmdReady=1.
++ *   16-bit side fills IPC_PARAMS, sets cmdReady=1, posts IPC_WM_WAKE.
+  *   Helper sees cmdReady=1, dispatches command, writes result, sets cmdReady=0.
+- *   16-bit side spin-waits on cmdReady==0.
++ *   16-bit side Yield()s until cmdReady==0.
+  *
+  * For DECODE: src/dst data is passed via separate GMEM_SHARE buffers
+  * whose HGLOBAL handles are stored in IPC_PARAMS.
+@@ -230,8 +230,6 @@ static DWORD Cmd_Decode(IPC_PARAMS *p)
+     frame.output.plane[0] = pDst;
+     frame.output.stride[0]= (int)p->dstStride;
+     frame.general = 0;
+-    if (p->flags & ICDECOMPRESS_HURRYUP)
+-        frame.general |= XVID_LOWDELAY;
+ 
+     /* Wrap xvid_decore in SEH: a crash in the decoder (e.g. consecutive VOL
+      * headers causing corrupt internal state) must not kill the helper process.
+@@ -316,6 +314,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
+         lstrcpyA(g_szLog + n, "XVIDHLP.LOG");
+     }
+     Log("---- helper start, cmdline '%s'", lpCmdLine);
++    {
++        char szMod[MAX_PATH];
++        GetModuleFileNameA(NULL, szMod, sizeof(szMod));
++        Log("%s built " __DATE__ " " __TIME__, szMod);
++    }
+ 
+     /* Parse HGLOBAL handle from command line (hex) */
+     hShared = (HGLOBAL)(DWORD)strtoul(lpCmdLine, NULL, 16);
+@@ -341,37 +344,25 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
+     if (!hwnd) return 1;
+     Log("window created, entering loop");
+ 
+-    /* Main loop: poll shared memory for commands, process messages.
+-     * Spin briefly before sleeping to minimize latency — on Win32s
+-     * Sleep(1) can stall up to 55ms (one timer tick). */
++    /* Main loop: run pending commands, then block in GetMessage until
++     * the 16-bit side posts IPC_WM_WAKE. Blocking matters: a helper that
++     * polls (Sleep(1) just yields on Win32s) is always runnable and wins
++     * every Yield(), so other apps never get to process WM_PAINT while
++     * video plays on a slow machine. No wakeup can be lost: scheduling
++     * is cooperative, so the 16-bit side cannot set cmdReady between our
++     * check and GetMessage, and a message posted earlier stays queued. */
+     for (;;) {
+-        int spin;
+-
+-        /* Check for quit flag */
+-        if (p->quit) break;
+-
+-        /* Spin-check for a pending command before falling through
+-         * to the expensive Sleep path. */
+-        for (spin = 0; spin < 1000; spin++) {
+-            if (p->cmdReady) {
+-                DispatchCommand(p);
+-                p->cmdReady = 0;  /* Signal completion */
+-                spin = -1;        /* Reset: check again immediately */
+-                break;
+-            }
+-        }
+-
+         if (p->quit) break;
+ 
+-        /* Process Windows messages (non-blocking) */
+-        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+-            if (msg.message == WM_QUIT) goto done;
+-            TranslateMessage(&msg);
+-            DispatchMessageA(&msg);
++        if (p->cmdReady) {
++            DispatchCommand(p);
++            p->cmdReady = 0;  /* Signal completion */
++            continue;
+         }
+ 
+-        /* Yield CPU when no command is pending */
+-        Sleep(1);
++        if (GetMessageA(&msg, NULL, 0, 0) <= 0) goto done;
++        TranslateMessage(&msg);
++        DispatchMessageA(&msg);
+     }
+ 
+ done:

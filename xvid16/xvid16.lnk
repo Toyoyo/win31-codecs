@@ -13,3 +13,5 @@ library clibl.lib
 # WEP must be RESIDENTNAME for Windows 3.x
 export WEP.1 RESIDENT
 export DriverProc.2
+# Win32s Universal Thunk target, called by xvidhlp.exe
+export UTProc.3

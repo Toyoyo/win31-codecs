@@ -46,6 +46,9 @@ static BOOL             g_bWin32s       = FALSE;
 
 /* Helper process HWND (32-bit XVIDHLP.EXE) */
 static HWND             g_hwndHelper    = NULL;
+/* Task waiting in CallHelperEx(TRUE); UTProc hands the CPU straight back
+ * to it when the helper finishes a command */
+static HTASK            g_hTaskWaiting  = 0;
 
 /* Shared memory block for helper communication */
 static HANDLE           g_hSharedMem    = NULL;
@@ -276,14 +279,27 @@ static BOOL InitIPC(void)
     return TRUE;
 }
 
-static void TermIPC(void)
+/* bWait: give the helper time to actually exit. It must, because its
+ * Universal Thunk registration holds a reference on this DLL: as long as
+ * it runs, the DLL is never unloaded and WEP never stops it. Not used
+ * from WEP, which may run during Windows shutdown. */
+static void TermIPC(BOOL bWait)
 {
+    DWORD t0;
+
     /* Tell helper to quit */
     if (g_pShared) {
         g_pShared->quit = 1;
         if (g_hwndHelper && IsWindow(g_hwndHelper))
             PostMessage(g_hwndHelper, IPC_WM_WAKE, 0, 0L);
         Yield();
+        if (bWait && g_hwndHelper) {
+            t0 = GetTickCount();
+            while (IsWindow(g_hwndHelper) && GetTickCount() - t0 < 2000UL)
+                Yield();
+            DbgLog("TermIPC: helper %s", (LPSTR)(IsWindow(g_hwndHelper)
+                   ? "still running after 2 s" : "exited"));
+        }
     }
     g_hwndHelper = NULL;
 
@@ -336,9 +352,10 @@ static BOOL EnsureBuffers(DWORD cbSrc, DWORD cbDst)
 /* ------------------------------------------------------------------ */
 /*  Send a command to the 32-bit helper via shared memory and wait      */
 /* ------------------------------------------------------------------ */
-static DWORD CallHelper(void)
+static DWORD CallHelperEx(BOOL bExclusive)
 {
     DWORD t0;
+    HTASK hTaskHelper;
 
     if (!g_pShared)
         return (DWORD)ICERR_INTERNAL;
@@ -351,15 +368,36 @@ static DWORD CallHelper(void)
     if (g_hwndHelper)
         PostMessage(g_hwndHelper, IPC_WM_WAKE, 0, 0L);
 
+    /* bExclusive: switch straight to the helper instead of letting any
+     * task run. DrawDib decides where it may write on screen before it
+     * calls ICDecompress and draws (via DCI) after it returns; if other
+     * apps repaint while we wait, it draws over them with that stale
+     * decision. A native codec never yields there. */
+    hTaskHelper = 0;
+    if (bExclusive && g_hwndHelper)
+        hTaskHelper = GetWindowTask(g_hwndHelper);
+
+    /* When the helper is done it calls UTProc through a Win32s Universal
+     * Thunk, which DirectedYields back here; otherwise Windows would pick
+     * any task when the helper blocks in GetMessage. */
+    if (hTaskHelper)
+        g_hTaskWaiting = GetCurrentTask();
+
     /* Timeout is wall-clock, not an iteration count: on a fast CPU an
      * iteration-based limit can expire before the helper is scheduled. */
     for (;;) {
-        Yield();
-        if (!g_pShared->cmdReady)
+        if (hTaskHelper)
+            DirectedYield(hTaskHelper);
+        else
+            Yield();
+        if (!g_pShared->cmdReady) {
+            g_hTaskWaiting = 0;
             return g_pShared->result;
+        }
         if (GetTickCount() - t0 > 2000UL)
             break;
     }
+    g_hTaskWaiting = 0;
 
     /* Cancel the pending command so the helper doesn't run it later
      * against stale parameters. Safe: scheduling is cooperative, so the
@@ -375,6 +413,31 @@ static DWORD CallHelper(void)
         g_hwndHelper = NULL;
 
     return (DWORD)ICERR_INTERNAL;  /* Timeout */
+}
+
+static DWORD CallHelper(void)
+{
+    return CallHelperEx(FALSE);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Win32s Universal Thunk target, called by xvidhlp.exe (on its own   */
+/*  task) right after it finishes a command. DrawDib checks that the   */
+/*  window is unobscured, calls ICDecompress, then writes the frame to */
+/*  the screen through DCI without clipping. If another app ran while  */
+/*  we waited for the helper, a window raised meanwhile gets a stale   */
+/*  frame stamped over it. Switching straight back to the waiting task */
+/*  keeps other apps out of that window.                               */
+/* ------------------------------------------------------------------ */
+#define UT_FUNC_DONE    1
+
+DWORD FAR PASCAL __loadds UTProc(LPVOID lpBuf, DWORD dwFunc)
+{
+    (void)lpBuf;
+    if (dwFunc == UT_FUNC_DONE && g_hTaskWaiting &&
+        g_pShared && !g_pShared->cmdReady)
+        DirectedYield(g_hTaskWaiting);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -432,7 +495,7 @@ int FAR PASCAL __loadds LibMain(HINSTANCE hInstance, WORD wDataSeg,
 int FAR PASCAL __loadds WEP(int bSystemExit)
 {
     (void)bSystemExit;
-    TermIPC();
+    TermIPC(FALSE);
     return 1;
 }
 
@@ -591,6 +654,21 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
     pInst->nFrames++;
     if (bNoOutput) pInst->nSkipped++;
 
+    /* Where does the caller want the pixels? With DCI, DrawDib may pass
+     * a pointer straight into video memory and hold DCI access while we
+     * Yield() waiting for the helper. Log the first frames of each run:
+     * a huge selector limit / high base means a frame buffer pointer. */
+    if (pInst->nFrames <= 3) {
+        UINT sel = SELECTOROF(lpDst);
+        DbgLog("DECOMPRESS: flags=%08lX dst %ldx%ld %ubpp comp=%lu "
+               "size=%lu, lpDst=%04X:%04X base=%08lX limit=%08lX",
+               dwFlags, lpbiDst->biWidth, lpbiDst->biHeight,
+               lpbiDst->biBitCount, lpbiDst->biCompression,
+               lpbiDst->biSizeImage, sel, OFFSETOF(lpDst),
+               sel ? GetSelectorBase(sel) : 0UL,
+               sel ? GetSelectorLimit(sel) : 0UL);
+    }
+
     {
         DWORD dstBytes  = DibImageSize(lpbiDst);
         LONG  h = lpbiDst->biHeight < 0 ? -lpbiDst->biHeight : lpbiDst->biHeight;
@@ -617,7 +695,7 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
         g_pShared->hDstMem   = (DWORD)(WORD)g_hDstBuf;
 
         t = timeGetTime();
-        rc = CallHelper();
+        rc = CallHelperEx(TRUE);
         pInst->msDecode += timeGetTime() - t;
 
         /* Copy decoded output back */
@@ -1070,8 +1148,12 @@ LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
         return 1L;  /* Accept load */
 
     case DRV_FREE:
-        /* Don't tear down IPC here — VFW may reload the driver.
-         * WEP handles final cleanup on DLL unload. */
+        /* Last driver handle closed; VfW unloads the DLL next. Stop the
+         * helper now: its thunk registration keeps this DLL loaded, so
+         * WEP would never run and the helper would outlive playback
+         * (and hang Windows shutdown). The begin handlers restart it
+         * on demand if VfW keeps or reloads the driver. */
+        TermIPC(TRUE);
         return 1L;
 
     case DRV_OPEN:

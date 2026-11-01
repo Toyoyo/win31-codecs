@@ -107,13 +107,12 @@
 #define BI_BITFIELDS                3L
 #endif
 
-/* ICM flags */
-#define ICDECOMPRESS_NOSKIP         0x0001
-#define ICDECOMPRESS_HURRYUP        0x0002
-#define ICDECOMPRESS_UPDATE         0x0004
-#define ICDECOMPRESS_PREROLL        0x0008
-#define ICDECOMPRESS_NULLFRAME      0x0010
-#define ICDECOMPRESS_NEWPALETTE     0x0020
+/* ICDECOMPRESS flags (vfw.h values; same bits as ICDRAW_*) */
+#define ICDECOMPRESS_HURRYUP        0x80000000UL
+#define ICDECOMPRESS_UPDATE         0x40000000UL
+#define ICDECOMPRESS_PREROLL        0x20000000UL
+#define ICDECOMPRESS_NULLFRAME      0x10000000UL
+#define ICDECOMPRESS_NOTKEYFRAME    0x08000000UL
 
 /* Codec info flags */
 #define VIDCF_QUALITY               0x0001

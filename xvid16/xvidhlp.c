@@ -8,7 +8,9 @@
  * Protocol:
  *   16-bit side fills IPC_PARAMS, sets cmdReady=1, posts IPC_WM_WAKE.
  *   Helper sees cmdReady=1, dispatches command, writes result, sets cmdReady=0.
- *   16-bit side Yield()s until cmdReady==0.
+ *   16-bit side Yield()s until cmdReady==0. If the Win32s Universal
+ *   Thunk is available, the helper then calls UTPROC in xvid16.dll,
+ *   which DirectedYields back to the waiting task.
  *
  * For DECODE: src/dst data is passed via separate GMEM_SHARE buffers
  * whose HGLOBAL handles are stored in IPC_PARAMS.
@@ -278,6 +280,62 @@ static void DispatchCommand(IPC_PARAMS *p)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Win32s Universal Thunk back into xvid16.dll. After each command we  */
+/*  call its UTPROC, which DirectedYields to the task waiting for the   */
+/*  result, so no other app runs between DrawDib's visibility check and */
+/*  its DCI screen write (see UTProc in codec16.c). Optional: without   */
+/*  it the codec still works, other apps may just run before we return. */
+/* ------------------------------------------------------------------ */
+#define UT_FUNC_DONE    1
+
+typedef DWORD (WINAPI *UT32PROC)(LPVOID lpBuff, DWORD dwUserDefined,
+                                 LPVOID *lpTranslationList);
+typedef BOOL (WINAPI *UTREGISTER)(HANDLE hModule, LPCSTR lpsz16BitDLL,
+                                  LPCSTR lpszInitName, LPCSTR lpszProcName,
+                                  UT32PROC *ppfn32Thunk,
+                                  FARPROC pfnUT32Callback, LPVOID lpBuff);
+typedef VOID (WINAPI *UTUNREGISTER)(HANDLE hModule);
+
+static UT32PROC     g_pfnUTDone = NULL;
+static UTUNREGISTER g_pfnUTUnRegister = NULL;
+
+static void InitThunk(void)
+{
+    static const char *mods[] = { "KERNEL32.DLL", "W32SUT32.DLL" };
+    UTREGISTER pfnRegister = NULL;
+    HMODULE hMod;
+    int i;
+
+    for (i = 0; i < 2 && !pfnRegister; i++) {
+        hMod = GetModuleHandleA(mods[i]);
+        if (!hMod) hMod = LoadLibraryA(mods[i]);
+        if (!hMod) continue;
+        pfnRegister = (UTREGISTER)GetProcAddress(hMod, "UTRegister");
+        g_pfnUTUnRegister = (UTUNREGISTER)GetProcAddress(hMod, "UTUnRegister");
+        if (pfnRegister) Log("thunk: UTRegister found in %s", mods[i]);
+    }
+    if (!pfnRegister) {
+        Log("thunk: UTRegister not found, running without");
+        return;
+    }
+    /* 16-bit export names are uppercase (wlink) */
+    if (!pfnRegister(GetModuleHandleA(NULL), "XVID16.DLL", NULL, "UTPROC",
+                     &g_pfnUTDone, NULL, NULL)) {
+        Log("thunk: UTRegister failed, running without");
+        g_pfnUTDone = NULL;
+        return;
+    }
+    Log("thunk: registered");
+}
+
+static void TermThunk(void)
+{
+    if (g_pfnUTDone && g_pfnUTUnRegister)
+        g_pfnUTUnRegister(GetModuleHandleA(NULL));
+    g_pfnUTDone = NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Window procedure (minimal - just keeps app alive)                   */
 /* ------------------------------------------------------------------ */
 static const char g_szClass[] = "XviDHelper";
@@ -343,6 +401,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
                          NULL, NULL, hInst, NULL);
     if (!hwnd) return 1;
     Log("window created, entering loop");
+    InitThunk();
 
     /* Main loop: run pending commands, then block in GetMessage until
      * the 16-bit side posts IPC_WM_WAKE. Blocking matters: a helper that
@@ -357,6 +416,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
         if (p->cmdReady) {
             DispatchCommand(p);
             p->cmdReady = 0;  /* Signal completion */
+            /* Hand the CPU straight back to the waiting 16-bit task */
+            if (g_pfnUTDone)
+                g_pfnUTDone(NULL, UT_FUNC_DONE, NULL);
             continue;
         }
 
@@ -367,6 +429,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
 
 done:
     Log("helper exiting (quit=%lu)", p->quit);
+    TermThunk();
     /* Cleanup decoder instances */
     {
         int i;
