@@ -3,12 +3,12 @@
  *
  * The 16-bit VFW codec (xvid16.dll) launches this helper with the
  * HGLOBAL handle of a GMEM_SHARE IPC_PARAMS block on the command line.
- * The helper GlobalLock's it and polls the cmdReady flag.
+ * The helper GlobalLock's it and waits in GetMessage for IPC_WM_WAKE.
  *
  * Protocol:
- *   16-bit side fills IPC_PARAMS, sets cmdReady=1.
+ *   16-bit side fills IPC_PARAMS, sets cmdReady=1, posts IPC_WM_WAKE.
  *   Helper sees cmdReady=1, dispatches command, writes result, sets cmdReady=0.
- *   16-bit side spin-waits on cmdReady==0.
+ *   16-bit side Yield()s until cmdReady==0.
  *
  * For DECODE: src/dst data is passed via separate GMEM_SHARE buffers
  * whose HGLOBAL handles are stored in IPC_PARAMS.
@@ -230,8 +230,6 @@ static DWORD Cmd_Decode(IPC_PARAMS *p)
     frame.output.plane[0] = pDst;
     frame.output.stride[0]= (int)p->dstStride;
     frame.general = 0;
-    if (p->flags & ICDECOMPRESS_HURRYUP)
-        frame.general |= XVID_LOWDELAY;
 
     /* Wrap xvid_decore in SEH: a crash in the decoder (e.g. consecutive VOL
      * headers causing corrupt internal state) must not kill the helper process.
@@ -316,6 +314,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
         lstrcpyA(g_szLog + n, "XVIDHLP.LOG");
     }
     Log("---- helper start, cmdline '%s'", lpCmdLine);
+    {
+        char szMod[MAX_PATH];
+        GetModuleFileNameA(NULL, szMod, sizeof(szMod));
+        Log("%s built " __DATE__ " " __TIME__, szMod);
+    }
 
     /* Parse HGLOBAL handle from command line (hex) */
     hShared = (HGLOBAL)(DWORD)strtoul(lpCmdLine, NULL, 16);
@@ -341,37 +344,25 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
     if (!hwnd) return 1;
     Log("window created, entering loop");
 
-    /* Main loop: poll shared memory for commands, process messages.
-     * Spin briefly before sleeping to minimize latency — on Win32s
-     * Sleep(1) can stall up to 55ms (one timer tick). */
+    /* Main loop: run pending commands, then block in GetMessage until
+     * the 16-bit side posts IPC_WM_WAKE. Blocking matters: a helper that
+     * polls (Sleep(1) just yields on Win32s) is always runnable and wins
+     * every Yield(), so other apps never get to process WM_PAINT while
+     * video plays on a slow machine. No wakeup can be lost: scheduling
+     * is cooperative, so the 16-bit side cannot set cmdReady between our
+     * check and GetMessage, and a message posted earlier stays queued. */
     for (;;) {
-        int spin;
-
-        /* Check for quit flag */
         if (p->quit) break;
 
-        /* Spin-check for a pending command before falling through
-         * to the expensive Sleep path. */
-        for (spin = 0; spin < 1000; spin++) {
-            if (p->cmdReady) {
-                DispatchCommand(p);
-                p->cmdReady = 0;  /* Signal completion */
-                spin = -1;        /* Reset: check again immediately */
-                break;
-            }
+        if (p->cmdReady) {
+            DispatchCommand(p);
+            p->cmdReady = 0;  /* Signal completion */
+            continue;
         }
 
-        if (p->quit) break;
-
-        /* Process Windows messages (non-blocking) */
-        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) goto done;
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-
-        /* Yield CPU when no command is pending */
-        Sleep(1);
+        if (GetMessageA(&msg, NULL, 0, 0) <= 0) goto done;
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
     }
 
 done:

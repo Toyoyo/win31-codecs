@@ -27,12 +27,14 @@
 #include "codec16.h"
 
 /* ------------------------------------------------------------------ */
-/*  Helper process IPC (Win32s - HGLOBAL shared memory + polling)       */
+/*  Helper process IPC (Win32s - HGLOBAL shared memory + wake message)  */
 /*                                                                      */
 /*  Architecture:                                                       */
 /*    xvid16.dll (16-bit) --- GMEM_SHARE IPC_PARAMS ---> xvidhlp.exe   */
-/*    16-bit side fills IPC_PARAMS, sets cmdReady=1, spin-waits.        */
-/*    xvidhlp.exe polls cmdReady, dispatches to XviD, clears cmdReady.  */
+/*    16-bit side fills IPC_PARAMS, sets cmdReady=1, posts IPC_WM_WAKE, */
+/*    then Yield()s until cmdReady is cleared.                          */
+/*    xvidhlp.exe wakes from GetMessage, dispatches to XviD, clears     */
+/*    cmdReady.                                                         */
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
@@ -237,6 +239,11 @@ static BOOL InitIPC(void)
 
     /* A helper left over from a previous load would answer FindWindow
      * below while polling a different (stale) shared block. */
+    {
+        char szMod[128];
+        GetModuleFileName(g_hInstance, szMod, sizeof(szMod));
+        DbgLog("InitIPC: %s built " __DATE__ " " __TIME__, (LPSTR)szMod);
+    }
     DbgLog("InitIPC: hShared=%04X, existing helper hwnd=%04X",
            (WORD)g_hSharedMem, (WORD)FindWindow("XviDHelper", NULL));
 
@@ -274,6 +281,8 @@ static void TermIPC(void)
     /* Tell helper to quit */
     if (g_pShared) {
         g_pShared->quit = 1;
+        if (g_hwndHelper && IsWindow(g_hwndHelper))
+            PostMessage(g_hwndHelper, IPC_WM_WAKE, 0, 0L);
         Yield();
     }
     g_hwndHelper = NULL;
@@ -329,28 +338,22 @@ static BOOL EnsureBuffers(DWORD cbSrc, DWORD cbDst)
 /* ------------------------------------------------------------------ */
 static DWORD CallHelper(void)
 {
-    int spin;
     DWORD t0;
 
     if (!g_pShared)
         return (DWORD)ICERR_INTERNAL;
 
-    /* Signal command ready and wait for helper to process it */
+    /* Signal command ready, wake the helper and wait for it. Scheduling
+     * is cooperative, so the helper only runs while we Yield(); spinning
+     * on cmdReady without yielding could never see it change. */
     t0 = GetTickCount();
     g_pShared->cmdReady = 1;
+    if (g_hwndHelper)
+        PostMessage(g_hwndHelper, IPC_WM_WAKE, 0, 0L);
 
-    /* Timeout is wall-clock, not an iteration count: the helper may be
-     * blocked in Sleep(1) for a full 55 ms timer tick, during which our
-     * Yield() won't schedule it. On a fast CPU an iteration-based limit
-     * can expire before the helper ever wakes up. */
+    /* Timeout is wall-clock, not an iteration count: on a fast CPU an
+     * iteration-based limit can expire before the helper is scheduled. */
     for (;;) {
-        /* Spin briefly before yielding — the 32-bit side often
-         * completes in microseconds, so avoid the full task-switch
-         * cost of Yield() when possible. */
-        for (spin = 0; spin < 100; spin++) {
-            if (!g_pShared->cmdReady)
-                return g_pShared->result;
-        }
         Yield();
         if (!g_pShared->cmdReady)
             return g_pShared->result;
@@ -537,9 +540,23 @@ static LRESULT icm_DecompressBegin(CODEC_INSTANCE FAR *pInst,
     return ICERR_OK;
 }
 
+/* Log and reset playback statistics (debug=1) */
+static void LogStats(CODEC_INSTANCE FAR *pInst, LPCSTR where)
+{
+    if (!pInst->nFrames) return;
+    DbgLog("%s: %u frames (%u hurry-up/preroll) in %lu ms, "
+           "decode %lu ms, paint %lu ms", where,
+           pInst->nFrames, pInst->nSkipped,
+           timeGetTime() - pInst->tStart,
+           pInst->msDecode, pInst->msPaint);
+    pInst->nFrames = pInst->nSkipped = 0;
+    pInst->msDecode = pInst->msPaint = 0;
+}
+
 /* ICM_DECOMPRESS_END */
 static LRESULT icm_DecompressEnd(CODEC_INSTANCE FAR *pInst)
 {
+    LogStats(pInst, "DECOMPRESS_END");
     if (pInst->hXvidHandle && g_bWin32s) {
         g_pShared->cmd    = IPC_CMD_CLOSE;
         g_pShared->handle = pInst->hXvidHandle;
@@ -558,7 +575,9 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
                                LPVOID lpDst)
 {
     DWORD csp;
-    DWORD rc;
+    DWORD rc, t;
+    BOOL bNoOutput = (dwFlags & (ICDECOMPRESS_HURRYUP |
+                                 ICDECOMPRESS_PREROLL)) != 0;
 
     if (!pInst->hXvidHandle) return ICERR_INTERNAL;
 
@@ -567,6 +586,10 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
 
     csp = BitmapToCSP(lpbiDst);
     if (!csp) return ICERR_BADFORMAT;
+
+    if (pInst->nFrames == 0) pInst->tStart = timeGetTime();
+    pInst->nFrames++;
+    if (bNoOutput) pInst->nSkipped++;
 
     {
         DWORD dstBytes  = DibImageSize(lpbiDst);
@@ -584,17 +607,21 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
         g_pShared->srcSize   = lpbiSrc->biSizeImage;
         g_pShared->dstStride = dstStride;
         g_pShared->dstSize   = dstBytes;
-        g_pShared->dstFormat = (LONG)csp;
+        /* A hurry-up/preroll frame won't be shown, so the caller needs
+         * no output: only decode to keep the reference pictures. */
+        g_pShared->dstFormat = bNoOutput ? (LONG)XVID_CSP_NULL : (LONG)csp;
 
         /* Copy compressed data into shared src buffer */
         hmemcpy(g_lpSrcBuf, lpSrc, lpbiSrc->biSizeImage);
         g_pShared->hSrcMem   = (DWORD)(WORD)g_hSrcBuf;
         g_pShared->hDstMem   = (DWORD)(WORD)g_hDstBuf;
 
+        t = timeGetTime();
         rc = CallHelper();
+        pInst->msDecode += timeGetTime() - t;
 
         /* Copy decoded output back */
-        if (rc == (DWORD)ICERR_OK && g_lpDstBuf)
+        if (rc == (DWORD)ICERR_OK && g_lpDstBuf && !bNoOutput)
             hmemcpy(lpDst, g_lpDstBuf, dstBytes);
     }
     return (rc == (DWORD)ICERR_OK) ? ICERR_OK : ICERR_ERROR;
@@ -620,6 +647,144 @@ static LRESULT icm_DecompressEx(CODEC_INSTANCE FAR *pInst,
 /* ------------------------------------------------------------------ */
 
 static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst); /* forward */
+
+static void FreeFrameBitmap(CODEC_INSTANCE FAR *pInst)
+{
+    if (pInst->hbmFrame) {
+        DeleteObject(pInst->hbmFrame);
+        pInst->hbmFrame = NULL;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Set up the fast paint path. GDI converts our 24-bit DIB to the     */
+/*  screen format on every frame, which costs more than decoding on a  */
+/*  16 bpp Matrox. Instead, have XviD write pixels in the display's    */
+/*  own format and blit them from a device bitmap. Win3.x leaves the   */
+/*  device bitmap layout to the display driver, so verify it: paint    */
+/*  known colours with SetPixel, read the raw bits back, and only use  */
+/*  the fast path if they match a format XviD can produce. The last    */
+/*  pixel is checked too, which catches rows padded to 64K segment     */
+/*  boundaries. On any mismatch we keep the 24-bit DIB path.           */
+/* ------------------------------------------------------------------ */
+static BOOL PixelIs(BYTE __huge *p, int bpp, DWORD c16, BYTE b, BYTE g, BYTE r)
+{
+    if (bpp == 16)
+        return ((WORD)p[0] | ((WORD)p[1] << 8)) == (WORD)c16;
+    return p[0] == b && p[1] == g && p[2] == r;
+}
+
+static void SetupFrameBitmap(CODEC_INSTANCE FAR *pInst, HDC hdc)
+{
+    int w = pInst->width, h = pInst->height;
+    int bpp, Bpp;
+    BITMAP bm;
+    HBITMAP hbm, hbmOld;
+    HDC hdcMem;
+    DWORD cb, csp = 0;
+    BYTE __huge *p;
+    BYTE __huge *pLast;
+
+    FreeFrameBitmap(pInst);
+    if (!hdc || w < 3 || h < 1) return;
+
+    bpp = GetDeviceCaps(hdc, BITSPIXEL) * GetDeviceCaps(hdc, PLANES);
+    if (GetDeviceCaps(hdc, PLANES) != 1 ||
+        (bpp != 16 && bpp != 24 && bpp != 32)) {
+        DbgLog("DRAW_BEGIN: screen %d bpp, using 24-bit DIB", bpp);
+        return;
+    }
+    Bpp = bpp / 8;
+
+    hbm = CreateCompatibleBitmap(hdc, w, h);
+    if (!hbm) goto fail;
+    GetObject(hbm, sizeof(bm), &bm);
+    if (bm.bmPlanes != 1 || bm.bmBitsPixel != bpp ||
+        (DWORD)bm.bmWidthBytes < (DWORD)w * Bpp)
+        goto fail;
+    cb = (DWORD)bm.bmWidthBytes * (DWORD)h;
+    if (!EnsureBuffers(SRC_BUF_MIN, cb)) goto fail;
+
+    hdcMem = CreateCompatibleDC(hdc);
+    if (!hdcMem) goto fail;
+    hbmOld = SelectObject(hdcMem, hbm);
+    PatBlt(hdcMem, 0, 0, w, h, BLACKNESS);
+    SetPixel(hdcMem, 0, 0, RGB(255, 0, 0));
+    SetPixel(hdcMem, 1, 0, RGB(0, 255, 0));
+    SetPixel(hdcMem, 2, 0, RGB(0, 0, 255));
+    SetPixel(hdcMem, w - 1, h - 1, RGB(255, 0, 0));
+    SelectObject(hdcMem, hbmOld);
+    DeleteDC(hdcMem);
+
+    if (GetBitmapBits(hbm, (LONG)cb, g_lpDstBuf) != (LONG)cb) goto fail;
+    p = (BYTE __huge *)g_lpDstBuf;
+    pLast = p + (DWORD)(h - 1) * bm.bmWidthBytes + (DWORD)(w - 1) * Bpp;
+
+    if (bpp == 16) {
+        if (PixelIs(p, 16, 0xF800, 0, 0, 0) &&
+            PixelIs(p + 2, 16, 0x07E0, 0, 0, 0) &&
+            PixelIs(p + 4, 16, 0x001F, 0, 0, 0) &&
+            PixelIs(pLast, 16, 0xF800, 0, 0, 0))
+            csp = XVID_CSP_RGB565;
+        else if (PixelIs(p, 16, 0x7C00, 0, 0, 0) &&
+                 PixelIs(p + 2, 16, 0x03E0, 0, 0, 0) &&
+                 PixelIs(p + 4, 16, 0x001F, 0, 0, 0) &&
+                 PixelIs(pLast, 16, 0x7C00, 0, 0, 0))
+            csp = XVID_CSP_RGB555;
+    } else if (PixelIs(p, bpp, 0, 0x00, 0x00, 0xFF) &&
+               PixelIs(p + Bpp, bpp, 0, 0x00, 0xFF, 0x00) &&
+               PixelIs(p + 2 * Bpp, bpp, 0, 0xFF, 0x00, 0x00) &&
+               PixelIs(pLast, bpp, 0, 0x00, 0x00, 0xFF)) {
+        csp = (bpp == 24) ? XVID_CSP_BGR : XVID_CSP_BGRA;
+    }
+    if (!csp) {
+        DbgLog("DRAW_BEGIN: screen %d bpp, unknown bitmap layout "
+               "(%02X %02X %02X %02X %02X %02X), using 24-bit DIB", bpp,
+               p[0], p[1], p[2], p[3], p[4], p[5]);
+        DeleteObject(hbm);
+        return;
+    }
+
+    pInst->hbmFrame    = hbm;
+    pInst->cspFrame    = csp;
+    pInst->strideFrame = (DWORD)bm.bmWidthBytes;
+    pInst->cbFrame     = cb;
+    DbgLog("DRAW_BEGIN: screen %d bpp, device bitmap %s, %u bytes/row", bpp,
+           (LPSTR)(csp == XVID_CSP_RGB565 ? "RGB565" :
+                   csp == XVID_CSP_RGB555 ? "RGB555" :
+                   csp == XVID_CSP_BGR    ? "BGR24"  : "BGRA32"),
+           bm.bmWidthBytes);
+    return;
+
+fail:
+    if (hbm) DeleteObject(hbm);
+    DbgLog("DRAW_BEGIN: screen %d bpp, device bitmap unavailable, "
+           "using 24-bit DIB", bpp);
+}
+
+/* Fast path: device bitmap already in screen format, copy and blit */
+static void PaintFrameBitmap(CODEC_INSTANCE FAR *pInst, HDC hdc,
+                             int xDst, int yDst, int dxDst, int dyDst,
+                             int xSrc, int ySrc, int dxSrc, int dySrc)
+{
+    HDC hdcMem;
+    HBITMAP hbmOld;
+
+    SetBitmapBits(pInst->hbmFrame, pInst->cbFrame, g_lpDstBuf);
+    hdcMem = CreateCompatibleDC(hdc);
+    if (!hdcMem) return;
+    hbmOld = SelectObject(hdcMem, pInst->hbmFrame);
+    /* The bitmap is top-down, so the source rect is used as is */
+    if (dxDst == dxSrc && dyDst == dySrc) {
+        BitBlt(hdc, xDst, yDst, dxDst, dyDst, hdcMem, xSrc, ySrc, SRCCOPY);
+    } else {
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        StretchBlt(hdc, xDst, yDst, dxDst, dyDst,
+                   hdcMem, xSrc, ySrc, dxSrc, dySrc, SRCCOPY);
+    }
+    SelectObject(hdcMem, hbmOld);
+    DeleteDC(hdcMem);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Paint the last decoded frame into the ICM_DRAW_BEGIN destination.  */
@@ -662,8 +827,11 @@ static void PaintFrame(CODEC_INSTANCE FAR *pInst)
         dxSrc = w; dySrc = h;
     }
 
-    if (xSrc == 0 && ySrc == 0 && dxSrc == w && dySrc == h &&
-        dxDst == w && dyDst == h) {
+    if (pInst->hbmFrame) {
+        PaintFrameBitmap(pInst, hdc, xDst, yDst, dxDst, dyDst,
+                         xSrc, ySrc, dxSrc, dySrc);
+    } else if (xSrc == 0 && ySrc == 0 && dxSrc == w && dySrc == h &&
+               dxDst == w && dyDst == h) {
         /* 1:1 full frame: SetDIBitsToDevice bypasses the stretch
          * engine and is significantly faster. */
         SetDIBitsToDevice(hdc,
@@ -784,6 +952,13 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
     pInst->biDraw.biCompression = BI_RGB;
     pInst->biDraw.biSizeImage   = dibSize;
 
+    /* Pick the fast paint path if the display allows it */
+    {
+        HDC hdc = pDB->hwnd ? GetDC(pDB->hwnd) : pDB->hdc;
+        SetupFrameBitmap(pInst, hdc);
+        if (pDB->hwnd && hdc) ReleaseDC(pDB->hwnd, hdc);
+    }
+
     return ICERR_OK;
 }
 
@@ -791,10 +966,16 @@ static LRESULT icm_DrawBegin(CODEC_INSTANCE FAR *pInst,
 static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
                               ICDRAW FAR *pDraw)
 {
-    DWORD rc, stride;
+    DWORD rc, stride, csp, t;
+    BOOL bNoPaint = (pDraw->dwFlags & (ICDRAW_HURRYUP | ICDRAW_PREROLL)) != 0;
 
     /* UPDATE flag: repaint last frame without decoding */
     if (pDraw->dwFlags & ICDRAW_UPDATE) goto paint;
+
+    /* Statistics: how far behind MCIAVI is and where the time goes */
+    if (pInst->nFrames == 0) pInst->tStart = timeGetTime();
+    pInst->nFrames++;
+    if (bNoPaint) pInst->nSkipped++;
 
     /* Null frame - nothing to draw */
     if (pDraw->dwFlags & ICDRAW_NULLFRAME) return ICERR_OK;
@@ -804,7 +985,14 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
 
     /* Decode via helper (if decoder is available) */
     if (pInst->hXvidHandle && g_hwndHelper && g_pShared) {
-        stride = (DWORD)(((DWORD)pInst->width * 24 + 31) / 32) * 4;
+        /* Device bitmap: top-down, display format. DIB: bottom-up BGR. */
+        if (pInst->hbmFrame) {
+            stride = pInst->strideFrame;
+            csp    = pInst->cspFrame;
+        } else {
+            stride = (DWORD)(((DWORD)pInst->width * 24 + 31) / 32) * 4;
+            csp    = XVID_CSP_BGR | XVID_CSP_VFLIP;
+        }
 
         g_pShared->cmd       = IPC_CMD_DECODE;
         g_pShared->handle    = pInst->hXvidHandle;
@@ -812,7 +1000,10 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
         g_pShared->srcSize   = pDraw->cbData;
         g_pShared->dstStride = stride;
         g_pShared->dstSize   = stride * (DWORD)pInst->height;
-        g_pShared->dstFormat = (LONG)(XVID_CSP_BGR | XVID_CSP_VFLIP);
+        /* Frames that won't be drawn only need decoding to keep the
+         * reference pictures current; skip the RGB conversion, which
+         * helps a CPU-bound machine catch up. */
+        g_pShared->dstFormat = bNoPaint ? (LONG)XVID_CSP_NULL : (LONG)csp;
 
         /* Copy compressed data into shared src buffer, growing it for
          * an unusually large frame; skip the decode if that fails
@@ -822,24 +1013,29 @@ static LRESULT icm_DrawFrame(CODEC_INSTANCE FAR *pInst,
             g_pShared->hSrcMem = (DWORD)(WORD)g_hSrcBuf;
             g_pShared->hDstMem = (DWORD)(WORD)g_hDstBuf;
 
+            t = timeGetTime();
             rc = CallHelper();
+            pInst->msDecode += timeGetTime() - t;
             (void)rc;
         }
     }
 
     /* Skip painting if hurry-up (decode only for reference frames) */
-    if (pDraw->dwFlags & ICDRAW_HURRYUP) return ICERR_OK;
-    if (pDraw->dwFlags & ICDRAW_PREROLL) return ICERR_OK;
+    if (bNoPaint) return ICERR_OK;
 
     /* Paint the decoded frame to the window */
 paint:
+    t = timeGetTime();
     PaintFrame(pInst);
+    pInst->msPaint += timeGetTime() - t;
     return ICERR_OK;
 }
 
 /* ICM_DRAW_END */
 static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst)
 {
+    LogStats(pInst, "DRAW_END");
+
     /* Close XviD decoder */
     if (pInst->hXvidHandle && g_bWin32s && g_pShared) {
         g_pShared->cmd    = IPC_CMD_CLOSE;
@@ -848,6 +1044,7 @@ static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst)
         pInst->hXvidHandle = 0;
     }
 
+    FreeFrameBitmap(pInst);
     pInst->hwndDraw = NULL;
     return ICERR_OK;
 }
@@ -890,7 +1087,7 @@ LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
     case DRV_CLOSE:
         if (pInst) {
             /* Clean up both decompress and draw state */
-            if (pInst->hwndDraw)
+            if (pInst->hwndDraw || pInst->hbmFrame)
                 icm_DrawEnd(pInst);
             else
                 icm_DecompressEnd(pInst);

@@ -102,6 +102,11 @@
 #define ICERR_BADBITDEPTH           (-200L)
 #define ICERR_BADIMAGESIZE          (-201L)
 
+/* Not in the Win16 SDK headers (introduced with Win32/Win95) */
+#ifndef BI_BITFIELDS
+#define BI_BITFIELDS                3L
+#endif
+
 /* ICM flags */
 #define ICDECOMPRESS_NOSKIP         0x0001
 #define ICDECOMPRESS_HURRYUP        0x0002
@@ -215,10 +220,25 @@ typedef struct {
     int         width;
     int         height;
     DWORD       hXvidHandle;    /* Handle returned by 32-bit side */
-    /* Draw mode state */
+    /* Draw mode state (from ICM_DRAW_BEGIN) */
     HWND        hwndDraw;
-    short       xDst, yDst, dxDst, dyDst;
+    HDC         hdcDraw;        /* only used when hwndDraw is NULL */
+    short       xDst, yDst, dxDst, dyDst;   /* relative to window/DC */
+    short       xSrc, ySrc, dxSrc, dySrc;   /* relative to full frame */
+    BOOL        bDrawOff;       /* ICM_DRAW_WINDOW sent an empty rect */
     BITMAPINFOHEADER biDraw;    /* Output format for StretchDIBits */
+    /* Fast path: frame decoded straight into the display's own pixel
+     * format and blitted from a device bitmap (NULL = 24-bit DIB path) */
+    HBITMAP     hbmFrame;
+    DWORD       cspFrame;       /* XviD output format matching hbmFrame */
+    DWORD       strideFrame;    /* bytes per row of hbmFrame */
+    DWORD       cbFrame;        /* total bytes of hbmFrame */
+    /* Playback statistics, logged at ICM_DRAW_END / ICM_DECOMPRESS_END */
+    DWORD       tStart;         /* timeGetTime() of the first frame */
+    DWORD       msDecode;       /* time spent waiting for the helper */
+    DWORD       msPaint;        /* time spent in PaintFrame (draw mode) */
+    WORD        nFrames;        /* frames decoded */
+    WORD        nSkipped;       /* ... of which hurry-up/preroll */
 } CODEC_INSTANCE;
 
 /* Shared memory block for 16<->32 IPC communication.
@@ -252,6 +272,11 @@ typedef struct {
 #define IPC_CMD_CLOSE     2
 #define IPC_CMD_DECODE    3
 
+/* Posted to the helper window after setting cmdReady or quit. The helper
+ * sleeps in GetMessage between commands so that it is not runnable while
+ * idle; a polling helper would take every Yield() and starve other apps. */
+#define IPC_WM_WAKE       (WM_USER + 0x100)
+
 /* Output color format - must match XviD CSP values from xvid.h exactly.
  * Guarded so that including xvid.h before this header doesn't cause
  * "not identical definition" warnings. */
@@ -267,8 +292,14 @@ typedef struct {
 #ifndef XVID_CSP_RGBA
 #define XVID_CSP_RGBA       (1UL<<8)   /* 32-bit RGBA   */
 #endif
+#ifndef XVID_CSP_BGRA
+#define XVID_CSP_BGRA       (1UL<<6)   /* 32-bit BGRA (Windows DIB order) */
+#endif
 #ifndef XVID_CSP_YV12
 #define XVID_CSP_YV12       (1UL<<2)   /* YV12 planar   */
+#endif
+#ifndef XVID_CSP_NULL
+#define XVID_CSP_NULL       (1UL<<14)  /* decode only, no output */
 #endif
 #ifndef XVID_CSP_VFLIP
 #define XVID_CSP_VFLIP      (1UL<<31)  /* vertical flip */

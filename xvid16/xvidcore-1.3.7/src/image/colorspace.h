@@ -176,6 +176,8 @@ packedFunc yv12_to_uyvyi_c;
 /* mmx */
 packedFunc yv12_to_bgr_mmx;
 packedFunc yv12_to_bgra_mmx;
+packedFunc yv12_to_rgb565_mmx;
+packedFunc yv12_to_rgb555_mmx;
 packedFunc yv12_to_yuyv_mmx;
 packedFunc yv12_to_uyvy_mmx;
 

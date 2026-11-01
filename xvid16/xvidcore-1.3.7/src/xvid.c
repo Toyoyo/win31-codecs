@@ -429,6 +429,8 @@ int xvid_gbl_init(xvid_gbl_init_t * init)
 		/* image output yv12_to_xxx related functions */
 		yv12_to_bgr   = yv12_to_bgr_mmx;
 		yv12_to_bgra  = yv12_to_bgra_mmx;
+		yv12_to_rgb565 = yv12_to_rgb565_mmx;
+		yv12_to_rgb555 = yv12_to_rgb555_mmx;
 		yv12_to_yuyv  = yv12_to_yuyv_mmx;
 		yv12_to_uyvy  = yv12_to_uyvy_mmx;
 

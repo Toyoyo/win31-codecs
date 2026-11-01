@@ -28,10 +28,10 @@ allocated with `GMEM_SHARE`.
 ### IPC Protocol
 
 1. `xvid16.dll` allocates an `IPC_PARAMS` block with `GlobalAlloc(GMEM_SHARE)` and launches `xvidhlp.exe`, passing the `HGLOBAL` handle on the command line (as a hex string).
-2. The helper locks the block with `GlobalLock` and enters a polling loop.
-3. For each operation, the 16-bit side fills the command fields in `IPC_PARAMS`, sets `cmdReady = 1`, then spin-waits with periodic `Yield()` calls.
-4. The helper detects `cmdReady == 1`, dispatches the command (open/decode/close), writes the result, and clears `cmdReady = 0`.
-5. The 16-bit side resumes. A 5000-iteration timeout with `IsWindow()` check guards against a crashed helper.
+2. The helper locks the block with `GlobalLock` and waits in `GetMessage`.
+3. For each operation, the 16-bit side fills the command fields in `IPC_PARAMS`, sets `cmdReady = 1`, posts `IPC_WM_WAKE` to the helper window, then calls `Yield()` until the command completes.
+4. The helper wakes, sees `cmdReady == 1`, dispatches the command (open/decode/close), writes the result, and clears `cmdReady = 0`.
+5. The 16-bit side resumes. A 2-second wall-clock timeout with an `IsWindow()` check guards against a crashed helper.
 
 Compressed frame data and decoded output are passed through two
 additional `GMEM_SHARE` buffers (`g_hSrcBuf` / `g_hDstBuf`) whose
@@ -42,8 +42,54 @@ these independently per decode call.
 
 The codec fully implements `ICM_DRAW_*` as required by MCIAVI on
 Windows 3.1. After decoding each frame into the shared dst buffer,
-`xvid16.dll` paints directly to the playback window using
-`SetDIBitsToDevice` (when no scaling is needed) or `StretchDIBits`.
+`xvid16.dll` paints directly to the playback window.
+
+On a 16, 24 or 32 bpp display, `ICM_DRAW_BEGIN` creates a device
+bitmap and checks its pixel layout (RGB565, RGB555, BGR24 or BGRA32)
+by drawing known colours with `SetPixel` and reading them back with
+`GetBitmapBits`. If the layout matches, XviD decodes straight into
+that format and each frame is shown with `SetBitmapBits` + `BitBlt`,
+which avoids GDI converting every pixel. Otherwise (8 bpp, unknown
+layout) frames are 24-bit DIBs painted with `SetDIBitsToDevice` or
+`StretchDIBits`. The chosen path is logged with `debug=1`.
+
+On a 16 bpp screen this relies on the MMX RGB565/RGB555 converters
+added to the bundled xvidcore (see *Local xvidcore changes*); xvid's
+own C converter is too slow for it to pay off.
+
+Measured on 640x360 ~30 fps material (`DRAW_END` statistics):
+
+| Machine / screen | Path | Decode | Paint | Shown fps | Hurry-up |
+|---|---|---|---|---|---|
+| PIII, Matrox Mystique, 16 bpp | old 24-bit DIB | 13.1 ms | 21.9 ms | 19.2 | 20% |
+| PIII, Matrox Mystique, 16 bpp | RGB565, C converter | 24.2 ms | 12.5 ms | 13.9 | 40% |
+| PIII, Matrox Mystique, 16 bpp | RGB565, MMX converter | 12.6 ms | 12.7 ms | 28.8 | 0.1% |
+| EeePC, vbesvga, 16 bpp | RGB565, MMX converter | 5.4 ms | 2.3 ms | 29.3 | 0.6% |
+| EeePC, vbesvga, 32 bpp | BGRA32 | 6.4 ms | 5.0 ms | 29.4 | 1.7% |
+
+RGB555 and BGR24 device bitmaps have not been seen on real hardware
+yet.
+
+MCIAVI only uses draw mode when no DCI provider is active; with DCI it
+decompresses through `ICM_DECOMPRESS` and displays frames itself via
+DrawDib. On the Matrox Mystique, VfW 1.1's DrawDib-over-DCI path leaves
+windows and menus raised over the video unpainted until playback
+pauses. This is not caused by xvid16. Removing the `DCI=` line from
+`SYSTEM.INI` `[drivers]` avoids it, and the draw path above is faster
+there anyway.
+
+### Local xvidcore changes
+
+The bundled `xvidcore-1.3.7/` is not pristine. Keep these changes if
+xvidcore is ever replaced:
+
+- `src/image/x86_asm/colorspace_rgb_mmx.asm`: `yv12_to_rgb565_mmx` and
+  `yv12_to_rgb555_mmx`, built from the existing `YV12_TO_BGR` macro
+  with a 16-bit packing step (`YV12_TO_RGB16_ROW`). No dithering;
+  output is bit-exact with `yv12_to_bgr_mmx` truncated to 5/6/5 or
+  5/5/5 bits.
+- `src/image/colorspace.h`, `src/xvid.c`: declare the two functions
+  and select them when MMX is available.
 
 ## Files
 
@@ -51,8 +97,8 @@ Windows 3.1. After decoding each frame into the shared dst buffer,
 |---------------|-------------------------------------------------------------------|
 | `codec16.h`   | Shared header: `IPC_PARAMS`, ICM message/flag/struct definitions, FOURCC constants, CSP constants |
 | `codec16.c`   | 16-bit VFW installable codec. Implements `LibMain`/`WEP`, `DriverProc`, all ICM handlers, helper process lifetime, and draw-mode painting |
-| `xvidhlp.c`   | 32-bit Win32s helper process. Polls shared memory for commands, drives `xvid_decore()`, wraps decode in SEH to survive corrupt streams |
-| `xvidcore-1.3.7/` | XviD 1.3.7 source tree (provides `xvid.h` and `xvidcore.lib`) |
+| `xvidhlp.c`   | 32-bit Win32s helper process. Waits for `IPC_WM_WAKE`, runs commands from shared memory, drives `xvid_decore()`, wraps decode in SEH to survive corrupt streams |
+| `xvidcore-1.3.7/` | XviD 1.3.7 source tree (provides `xvid.h` and `xvidcore.lib`), with local MMX RGB565/555 output added |
 
 ### codec16.h
 
@@ -77,7 +123,7 @@ The `DriverProc` entry point dispatches VFW messages:
 | `ICM_DECOMPRESS` / `ICM_DECOMPRESSEX` | Copies compressed data to shared src buffer, sends `IPC_CMD_DECODE`, copies decoded output from shared dst buffer |
 | `ICM_DECOMPRESS_END` | Sends `IPC_CMD_CLOSE` to helper |
 | `ICM_DRAW_BEGIN` | Allocates shared buffers, opens XviD decoder, records window/rect state |
-| `ICM_DRAW` | Decodes frame via helper, paints to window with `SetDIBitsToDevice` or `StretchDIBits` |
+| `ICM_DRAW` | Decodes frame via helper, paints to window from the device bitmap or with `SetDIBitsToDevice`/`StretchDIBits` |
 | `ICM_DRAW_UPDATE` | Repaints last decoded frame (e.g. after window uncover) |
 | `ICM_DRAW_WINDOW` | Updates destination rectangle |
 | `ICM_DRAW_END` | Closes XviD decoder, clears draw state |
@@ -92,9 +138,11 @@ called from `WEP` on DLL unload, setting `quit = 1` in shared memory.
 A minimal Win32 application with a hidden window (`"XviDHelper"`)
 that `FindWindow` in the 16-bit DLL uses to confirm the helper is alive.
 
-Main loop spin-checks `cmdReady` up to 1000 times before calling
-`Sleep(1)` to avoid burning a full 55 ms timer tick on Win32s for
-every idle iteration.
+Main loop runs any pending command, then blocks in `GetMessage` until
+the DLL posts `IPC_WM_WAKE`. The helper must not poll: a polling task
+is always runnable, takes every `Yield()`, and on a CPU-bound machine
+keeps other apps from ever repainting (menus and windows raised over
+the video stayed frozen).
 
 Command handlers:
 
@@ -106,7 +154,7 @@ Command handlers:
 
 The SEH wrapper means a corrupt stream or internal XviD crash drops
 only the affected frame rather than killing the helper and stalling
-the 16-bit side on the 5000-iteration timeout.
+the 16-bit side on the 2-second timeout.
 
 ## Supported FOURCCs
 
@@ -137,7 +185,7 @@ ORed into the color-space value to let XviD handle the vertical flip.
 
 ### Runtime
 - Windows 3.1 or Windows 3.11 for Workgroups
-- Win32s (Tested on 1.30c) required to run the 32-bit helper process
+- Win32s 1.30c or later - required to run the 32-bit helper process
 - Video for Windows 1.1e runtime
 
 ### Build
@@ -198,26 +246,9 @@ MPEG-4 video in AVI containers can now be played with Windows Media Player.
 - **Decode only.** Encoding is not supported (`ICERR_UNSUPPORTED`).
 - **No palette output.** 8-bit paletted output is not implemented.
 - **Single-threaded cooperative.** Win32s is cooperative; each frame
-  decode spin-waits on shared memory while yielding to the message
-  loop. A fast computer is recommended for smooth playback (Pentium III
+  decode waits on shared memory while yielding to other tasks. A fast computer is recommended for smooth playback (Pentium III
   or better for real-time; Pentium II will work but may drop frames).
 - **Memory.** XviD needs ~1 MB per open decoder instance plus frame
   buffers. Win32s memory is limited by available extended memory.
   (takes about 8MiB for a 640x360 video)
 - **Up to 8 concurrent decoder instances**
-- Even with the patched `MCIAVI.DRV` There are limitations concerning the AVI files that can be played.
-
-  Notably, ffmpeg doesn't generates correct headers for AVI files containing MPEG4 ASP, and `MCIAVI.DRV` doesn't like audio packets with variable sizes.
-
-  There's also an error in headers calculations for MSADCPM.
-
-  You have two options:
-
-  Either:
-
-  - If using MP3 audio, run `fix_avi.py` on AVI files and additionnaly `fix_padding.py` if using a sample rate other than 48Khz (theses scripts are in the `mp3acm` directory in this repo).
-  - If using ADCPM audio, run `fixadpcm.py` on AVI files.
-
-  Or:
-
-  - Patch ffmpeg with the patches provided in the `ffmpeg` directory in this repo.

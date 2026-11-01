@@ -97,6 +97,15 @@ VR_MUL: dw 102, 102, 102, 102
 
 BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
 
+;-----------------------------------------------------------------------------
+; YV12->RGB565/RGB555 packing masks
+;-----------------------------------------------------------------------------
+
+R565_MASK: dw 0xF800, 0xF800, 0xF800, 0xF800
+G565_MASK: dw 0x00FC, 0x00FC, 0x00FC, 0x00FC
+R555_MASK: dw 0x7C00, 0x7C00, 0x7C00, 0x7C00
+G555_MASK: dw 0x00F8, 0x00F8, 0x00F8, 0x00F8
+
 ;=============================================================================
 ; Helper macros used with the colorspace_mmx.inc file
 ;=============================================================================
@@ -319,11 +328,64 @@ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
 %endmacro
 
 ;------------------------------------------------------------------------------
-; YV12_TO_BGR( BYTES )
+; YV12_TO_RGB16_ROW( R, G, B, DST, IS555 )
 ;
-; BYTES		3=bgr(24-bit), 4=bgra(32-bit)
+; Packs one row of 8 pixels to 16-bit RGB and stores 16 bytes at DST.
+; R is an mm register (not mm0-mm3) with r7..r0 bytes, G and B are memory
+; operands with g7..g0 / b7..b0 bytes; mm7 must be zero.
+; Matches the C MK_RGB565/MK_RGB555 bit layout, without dithering.
+;------------------------------------------------------------------------------
+
+%macro YV12_TO_RGB16_ROW	5
+  movq mm0, %3              ; b7..b0
+  movq mm1, mm0
+  punpcklbw mm0, mm7        ; b3..b0 words
+  punpckhbw mm1, mm7        ; b7..b4 words
+  psrlw mm0, 3
+  psrlw mm1, 3
+  movq mm2, %2              ; g7..g0
+  movq mm3, mm2
+  punpcklbw mm2, mm7        ; g3..g0 words
+  punpckhbw mm3, mm7        ; g7..g4 words
+%if %5
+  pand mm2, [G555_MASK]
+  pand mm3, [G555_MASK]
+  psllw mm2, 2
+  psllw mm3, 2
+%else
+  pand mm2, [G565_MASK]
+  pand mm3, [G565_MASK]
+  psllw mm2, 3
+  psllw mm3, 3
+%endif
+  por mm0, mm2
+  por mm1, mm3
+  movq mm2, mm7
+  movq mm3, mm7
+  punpcklbw mm2, %1         ; r3..r0 in high bytes
+  punpckhbw mm3, %1         ; r7..r4 in high bytes
+%if %5
+  psrlw mm2, 1
+  psrlw mm3, 1
+  pand mm2, [R555_MASK]
+  pand mm3, [R555_MASK]
+%else
+  pand mm2, [R565_MASK]
+  pand mm3, [R565_MASK]
+%endif
+  por mm0, mm2
+  por mm1, mm3
+  movq [%4], mm0
+  movq [%4 + 8], mm1
+%endmacro
+
+;------------------------------------------------------------------------------
+; YV12_TO_BGR( BYTES, IS555 )
 ;
-; bytes=3/4, pixels = 8, vpixels=2
+; BYTES		2=rgb565/rgb555(16-bit), 3=bgr(24-bit), 4=bgra(32-bit)
+; IS555		for BYTES=2: 0=rgb565, 1=rgb555
+;
+; bytes=2/3/4, pixels = 8, vpixels=2
 ;------------------------------------------------------------------------------
 
 %macro YV12_TO_BGR_INIT		2
@@ -424,6 +486,12 @@ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
   psraw mm6, SCALEBITS_OUT
   psraw mm4, SCALEBITS_OUT
   packuswb mm4, mm6         ; r7r6r5r4r3r2r1r0 -> mm4 (TEMP_R1)
+%if %1 == 2     ; RGB565/RGB555 (16-bit)
+  movq mm6, mm7             ; TEMP_R2 -> mm6
+  pxor mm7, mm7
+  YV12_TO_RGB16_ROW mm4, [TEMP_G1], [TEMP_B1], x_ptr, %2
+  YV12_TO_RGB16_ROW mm6, [TEMP_G2], [TEMP_B2], x_ptr + x_stride, %2
+%else
   movq mm0, [TEMP_B1]
   movq mm1, [TEMP_G1]
   movq mm6, mm7
@@ -516,6 +584,7 @@ BRIGHT: db 128, 128, 128, 128, 128, 128, 128, 128
   movq [x_ptr + x_stride + 16], mm0
   movq [x_ptr + x_stride + 24], mm5
 %endif
+%endif
 
 %undef TEMP_Y1
 %undef TEMP_Y2
@@ -542,5 +611,7 @@ MAKE_COLORSPACE  rgba_to_yv12_mmx,0,   4,2,2,  RGB_TO_YV12,  4, -1
 ; output
 MAKE_COLORSPACE  yv12_to_bgr_mmx,48,   3,8,2,  YV12_TO_BGR,  3, -1
 MAKE_COLORSPACE  yv12_to_bgra_mmx,48,  4,8,2,  YV12_TO_BGR,  4, -1
+MAKE_COLORSPACE  yv12_to_rgb565_mmx,48, 2,8,2,  YV12_TO_BGR,  2, 0
+MAKE_COLORSPACE  yv12_to_rgb555_mmx,48, 2,8,2,  YV12_TO_BGR,  2, 1
 
 NON_EXEC_STACK
