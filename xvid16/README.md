@@ -27,10 +27,10 @@ allocated with `GMEM_SHARE`.
 
 ### IPC Protocol
 
-1. `xvid16.dll` allocates an `IPC_PARAMS` block with `GlobalAlloc(GMEM_SHARE)` and launches `xvidhlp.exe`, passing the `HGLOBAL` handle on the command line (as a hex string).
+1. `xvid16.dll` allocates an `IPC_PARAMS` block with `GlobalAlloc(GMEM_SHARE)` and launches `xvidhlp.exe` from the DLL's own directory (full path, so a stray copy elsewhere can never pair with the wrong DLL), passing the `HGLOBAL` handle on the command line (as a hex string).
 2. The helper locks the block with `GlobalLock` and waits in `GetMessage`.
-3. For each operation, the 16-bit side fills the command fields in `IPC_PARAMS`, sets `cmdReady = 1`, posts `IPC_WM_WAKE` to the helper window, then calls `Yield()` until the command completes.
-4. The helper wakes, sees `cmdReady == 1`, dispatches the command (open/decode/close), writes the result, and clears `cmdReady = 0`.
+3. For each operation, the 16-bit side fills the command fields in `IPC_PARAMS`, sets `cmdReady = 1`, posts `IPC_WM_WAKE` to the helper window, then waits until the command completes: `Yield()` in draw mode, `DirectedYield()` to the helper in the decompress path (see *DCI and helper scheduling*).
+4. The helper wakes, sees `cmdReady == 1`, dispatches the command (open/decode/close), writes the result, clears `cmdReady = 0` and, if registered, calls back into the DLL through a Win32s Universal Thunk to hand the CPU straight back to the waiting task.
 5. The 16-bit side resumes. A 2-second wall-clock timeout with an `IsWindow()` check guards against a crashed helper.
 
 Compressed frame data and decoded output are passed through two
@@ -70,13 +70,44 @@ Measured on 640x360 ~30 fps material (`DRAW_END` statistics):
 RGB555 and BGR24 device bitmaps have not been seen on real hardware
 yet.
 
-MCIAVI only uses draw mode when no DCI provider is active; with DCI it
-decompresses through `ICM_DECOMPRESS` and displays frames itself via
-DrawDib. On the Matrox Mystique, VfW 1.1's DrawDib-over-DCI path leaves
-windows and menus raised over the video unpainted until playback
-pauses. This is not caused by xvid16. Removing the `DCI=` line from
-`SYSTEM.INI` `[drivers]` avoids it, and the draw path above is faster
-there anyway.
+MCIAVI only uses draw mode when no DCI provider is active; with DCI the
+codec is driven through `ICM_DECOMPRESS(EX)` instead (see *DCI and
+helper scheduling*).
+
+### DCI and helper scheduling
+
+With a DCI provider installed (`DCI=` in `SYSTEM.INI` `[drivers]`),
+MCIAVI hands drawing to a VIDS.DRAW handler (on the test machine
+`UDH.DLL`, "Universal Draw Handler") and/or DrawDib, which call the
+codec's `ICM_DECOMPRESS(EX)` into their own buffer and then copy the
+frame to the screen through DCI.
+
+DrawDib does this per frame: check with `GetClipBox` that the window
+is unobscured, call the decompressor, then write the frame to video
+memory **without clipping**. A native Win16 codec never gives up the
+CPU inside that call. Ours has to wait for the 32-bit helper, and with
+a plain `Yield()` other applications ran in that gap:
+
+- a window raised or a menu opened during the wait got one stale video
+  frame stamped over it, which then stayed there (frozen pixels);
+- when UDH restarted the decompressor on a window resize, MCIAVI ended
+  up stopped instead of resuming playback.
+
+Every helper wait in the decompress path (open, decode, close) is
+therefore exclusive: the DLL `DirectedYield`s to the helper task, and
+when the helper finishes it calls `UTPROC` in `xvid16.dll` through a
+Win32s Universal Thunk (`UTRegister`), which `DirectedYield`s back to
+the waiting task. No other application runs in between, as with a
+native codec. Draw mode (no DCI) still uses `Yield()`; GDI clips at
+paint time there, so it is harmless and keeps other apps responsive.
+
+The thunk registration holds a reference on `xvid16.dll`, so the DLL
+stops the helper explicitly on `DRV_FREE` (waiting up to 2 s for it to
+exit); otherwise the helper would outlive playback and hang Windows
+shutdown.
+
+For builds without these fixes, `dcidva=0` under `[DrawDib]` in
+`WIN.INI` disables DCI in DrawDib only.
 
 ### Local xvidcore changes
 
@@ -118,8 +149,8 @@ The `DriverProc` entry point dispatches VFW messages:
 |---|---|
 | `DRV_OPEN` / `DRV_CLOSE` | Allocates / frees a `CODEC_INSTANCE` slot (up to 16 concurrent instances) |
 | `ICM_GETINFO` | Reports codec name, flags (`VIDCF_DRAW | VIDCF_FASTTEMPORALD`) |
-| `ICM_DECOMPRESS_QUERY` / `ICM_DECOMPRESSEX_QUERY` | Validates source FOURCC and destination bit-depth via `icm_DecompressQuery()` |
-| `ICM_DECOMPRESS_BEGIN` | Sends `IPC_CMD_OPEN` to helper; stores returned XviD handle |
+| `ICM_DECOMPRESS_QUERY` / `ICM_DECOMPRESSEX_QUERY` | Validates source FOURCC and destination bit-depth via `icm_DecompressQuery()`; refuses destinations of a different size and, for `EX`, anything but the full frame 1:1 at 0,0, so callers scale themselves |
+| `ICM_DECOMPRESS_BEGIN` | Sends `IPC_CMD_OPEN` to helper (exclusive wait); stores returned XviD handle |
 | `ICM_DECOMPRESS` / `ICM_DECOMPRESSEX` | Copies compressed data to shared src buffer, sends `IPC_CMD_DECODE`, copies decoded output from shared dst buffer |
 | `ICM_DECOMPRESS_END` | Sends `IPC_CMD_CLOSE` to helper |
 | `ICM_DRAW_BEGIN` | Allocates shared buffers, opens XviD decoder, records window/rect state |
@@ -131,7 +162,13 @@ The `DriverProc` entry point dispatches VFW messages:
 
 Helper lifetime: `InitIPC()` is called in `LibMain` and lazily on
 first `ICM_DECOMPRESS_BEGIN` / `ICM_DRAW_BEGIN`. `TermIPC()` is
-called from `WEP` on DLL unload, setting `quit = 1` in shared memory.
+called on `DRV_FREE` (waiting for the helper to exit, which releases
+its thunk reference on the DLL) and from `WEP` on DLL unload, setting
+`quit = 1` in shared memory.
+
+`UTPROC` (export ordinal 3) is the Universal Thunk target called by
+the helper after each command; it `DirectedYield`s to the task waiting
+in an exclusive helper call.
 
 ### xvidhlp.c
 
@@ -143,6 +180,12 @@ the DLL posts `IPC_WM_WAKE`. The helper must not poll: a polling task
 is always runnable, takes every `Yield()`, and on a CPU-bound machine
 keeps other apps from ever repainting (menus and windows raised over
 the video stayed frozen).
+
+At startup the helper looks up `UTRegister` (Win32s `KERNEL32.DLL`,
+then `W32SUT32.DLL`) and registers a thunk to `UTPROC` in
+`XVID16.DLL`; it calls the thunk after each command and unregisters
+it on exit. Without it the codec still works, just without the
+exclusive handback.
 
 Command handlers:
 
@@ -215,7 +258,14 @@ ORed into the color-space value to let XviD handle the vertical flip.
 
 ## Installation
 
-1. Copy `xvid16.dll` and `xvidhlp.exe` to `C:\WINDOWS\SYSTEM\`.
+1. Copy `xvid16.dll` and `xvidhlp.exe` to `C:\WINDOWS\SYSTEM\`, and
+   make sure no other copy exists anywhere else, especially not in
+   folders you play videos from. Windows 3.1 looks for a DLL named in
+   `SYSTEM.INI` in the **current directory first**, then the Windows
+   directory, then `SYSTEM`, so a stale `xvid16.dll` next to your videos
+   (or in your home/network drive) silently wins. The first line of
+   `XVID16.LOG` (`InitIPC: <path> built <date>`) shows which file ran;
+   a log without it comes from an old build.
 
 2. Edit `C:\WINDOWS\SYSTEM.INI`, section `[drivers]`, add:
    ```ini
@@ -239,6 +289,25 @@ ORed into the color-space value to let XviD handle the vertical flip.
 
 MPEG-4 video in AVI containers can now be played with Windows Media Player.
 
+## Configuration
+
+Optional keys in a `[xvid16]` section of `WIN.INI` (or `SYSTEM.INI`):
+
+| Key | Values | Effect |
+|---|---|---|
+| `debug` | `0` (default), `1`, `2` | `1`: append a trace to `<windir>\XVID16.LOG` and `XVIDHLP.LOG` (module paths and build times, draw path chosen, per-playback statistics). `2`: additionally log every driver message except per-frame ones, with its result |
+| `cpu` | `auto` (default), `c`, `mmx`, `mmxext` | Force xvidcore's CPU code paths |
+| `ddb` | `1` (default), `0` | `0` disables the device-bitmap fast path in draw mode (24-bit DIB painting instead) |
+| `thunk` | `1` (default), `0` | `0` makes the helper skip the Universal Thunk (testing only; brings back the DCI problems described above) |
+
+### Emulators
+
+Under DOSBox-X (`cputype=pentium_iii`, S3 Trio), xvidcore's MMX-extension
+code paths decode garbage (vertical stripes), and plain MMX occasionally
+hangs the emulator; the same binaries work on a real Pentium III. Use
+`cpu=c` there (or emulate a CPU without MMX). `cpu=mmx` decodes
+correctly but has frozen DOSBox-X now and then.
+
 ## Limitations
 
 - **Win32s required.** Plain Windows 3.1 without Win32s cannot run
@@ -246,8 +315,13 @@ MPEG-4 video in AVI containers can now be played with Windows Media Player.
 - **Decode only.** Encoding is not supported (`ICERR_UNSUPPORTED`).
 - **No palette output.** 8-bit paletted output is not implemented.
 - **Single-threaded cooperative.** Win32s is cooperative; each frame
-  decode waits on shared memory while yielding to other tasks. A fast computer is recommended for smooth playback (Pentium III
-  or better for real-time; Pentium II will work but may drop frames).
+  decode waits for the helper task (exclusively in the decompress
+  path, see *DCI and helper scheduling*). A fast computer is
+  recommended for smooth playback (Pentium III or better for
+  real-time; Pentium II will work but may drop frames).
+- **Resizing restarts decoding.** VfW restarts the decompressor on a
+  window resize and prerolls from the previous keyframe, so playback
+  pauses briefly; the length depends on the keyframe interval.
 - **Memory.** XviD needs ~1 MB per open decoder instance plus frame
   buffers. Win32s memory is limited by available extended memory.
   (takes about 8MiB for a 640x360 video)

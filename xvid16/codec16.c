@@ -49,6 +49,9 @@ static HWND             g_hwndHelper    = NULL;
 /* Task waiting in CallHelperEx(TRUE); UTProc hands the CPU straight back
  * to it when the helper finishes a command */
 static HTASK            g_hTaskWaiting  = 0;
+/* >0 while CallHelperEx waits; codec messages arriving then are re-entry
+ * (the waiting task handled a message sent to it during our yield) */
+static int              g_nWaitDepth    = 0;
 
 /* Shared memory block for helper communication */
 static HANDLE           g_hSharedMem    = NULL;
@@ -202,6 +205,28 @@ static DWORD DibImageSize(LPBITMAPINFOHEADER lpbi)
     return stride * (DWORD)h;
 }
 
+/* We decode at the stream's size only: no stretching, no sub-rects.
+ * Saying yes to another size makes DrawDib leave the scaling to us
+ * (e.g. when the playback window is resized), and the decoder would
+ * then write rows of the wrong length into the caller's buffer. */
+static BOOL SameSize(LPBITMAPINFOHEADER lpbiSrc, LPBITMAPINFOHEADER lpbiDst)
+{
+    LONG hs = lpbiSrc->biHeight < 0 ? -lpbiSrc->biHeight : lpbiSrc->biHeight;
+    LONG hd = lpbiDst->biHeight < 0 ? -lpbiDst->biHeight : lpbiDst->biHeight;
+    return lpbiSrc->biWidth == lpbiDst->biWidth && hs == hd;
+}
+
+/* ICDECOMPRESSEX rects must cover the whole frame, 1:1, at 0,0 */
+static BOOL FullFrameEx(ICDECOMPRESSEX FAR *p)
+{
+    LONG w = p->lpbiSrc->biWidth;
+    LONG h = p->lpbiSrc->biHeight < 0 ? -p->lpbiSrc->biHeight
+                                      :  p->lpbiSrc->biHeight;
+    return p->xSrc == 0 && p->ySrc == 0 && p->xDst == 0 && p->yDst == 0 &&
+           p->dxSrc == w && p->dySrc == h &&
+           p->dxDst == w && p->dyDst == h;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Helper process init/term                                            */
 /* ------------------------------------------------------------------ */
@@ -210,7 +235,8 @@ static BOOL InitIPC(void)
 {
     UINT uOldErr;
     int tries;
-    char cmdLine[40];
+    char cmdLine[160];
+    int n;
 
     /* Allocate shared memory block (GMEM_SHARE so 32-bit side can see it) */
     g_hSharedMem = GlobalAlloc(GMEM_SHARE | GMEM_MOVEABLE | GMEM_ZEROINIT,
@@ -234,11 +260,14 @@ static BOOL InitIPC(void)
     g_pShared->cmdReady = 0;
     g_pShared->quit = 0;
 
-    /* Launch the 32-bit helper with HGLOBAL handle as hex on command line */
-    {
-        WORD h = (WORD)g_hSharedMem;
-        wsprintf(cmdLine, "XVIDHLP.EXE %04X", h);
-    }
+    /* Launch the 32-bit helper with HGLOBAL handle as hex on command line.
+     * Use the directory this DLL was loaded from: a bare name follows the
+     * DLL search order (current directory first), which can pick up an
+     * older XVIDHLP.EXE that does not match this DLL. */
+    n = GetModuleFileName(g_hInstance, cmdLine, sizeof(cmdLine) - 24);
+    while (n > 0 && cmdLine[n - 1] != '\\' && cmdLine[n - 1] != ':')
+        n--;
+    wsprintf(cmdLine + n, "XVIDHLP.EXE %04X", (WORD)g_hSharedMem);
 
     /* A helper left over from a previous load would answer FindWindow
      * below while polling a different (stale) shared block. */
@@ -382,6 +411,7 @@ static DWORD CallHelperEx(BOOL bExclusive)
      * any task when the helper blocks in GetMessage. */
     if (hTaskHelper)
         g_hTaskWaiting = GetCurrentTask();
+    g_nWaitDepth++;
 
     /* Timeout is wall-clock, not an iteration count: on a fast CPU an
      * iteration-based limit can expire before the helper is scheduled. */
@@ -392,12 +422,14 @@ static DWORD CallHelperEx(BOOL bExclusive)
             Yield();
         if (!g_pShared->cmdReady) {
             g_hTaskWaiting = 0;
+            g_nWaitDepth--;
             return g_pShared->result;
         }
         if (GetTickCount() - t0 > 2000UL)
             break;
     }
     g_hTaskWaiting = 0;
+    g_nWaitDepth--;
 
     /* Cancel the pending command so the helper doesn't run it later
      * against stale parameters. Safe: scheduling is cooperative, so the
@@ -557,6 +589,12 @@ static LRESULT icm_DecompressQuery(LPBITMAPINFOHEADER lpbiSrc,
 {
     if (!IsValidSrcFormat(lpbiSrc)) return ICERR_BADFORMAT;
     if (lpbiDst && !IsValidDstFormat(lpbiDst)) return ICERR_BADFORMAT;
+    if (lpbiDst && !SameSize(lpbiSrc, lpbiDst)) {
+        DbgLog("DECOMPRESS_QUERY: refused %ldx%ld -> %ldx%ld (no scaling)",
+               lpbiSrc->biWidth, lpbiSrc->biHeight,
+               lpbiDst->biWidth, lpbiDst->biHeight);
+        return ICERR_BADFORMAT;
+    }
     return ICERR_OK;
 }
 
@@ -571,6 +609,10 @@ static LRESULT icm_DecompressBegin(CODEC_INSTANCE FAR *pInst,
 
     if (!IsValidSrcFormat(lpbiSrc)) return ICERR_BADFORMAT;
     if (!IsValidDstFormat(lpbiDst)) return ICERR_BADFORMAT;
+    DbgLog("DECOMPRESS_BEGIN: %ldx%ld -> %ldx%ld %ubpp",
+           lpbiSrc->biWidth, lpbiSrc->biHeight,
+           lpbiDst->biWidth, lpbiDst->biHeight, lpbiDst->biBitCount);
+    if (!SameSize(lpbiSrc, lpbiDst)) return ICERR_BADFORMAT;
 
     /* Lazy-init helper process */
     if (!g_bWin32s) {
@@ -596,7 +638,11 @@ static LRESULT icm_DecompressBegin(CODEC_INSTANCE FAR *pInst,
     g_pShared->fourcc = pInst->fccHandler;
     g_pShared->handle = 0;
 
-    rc = CallHelper();
+    /* Exclusive wait, like decoding: UDH restarts the decompressor in the
+     * middle of MCIAVI's resize handling, and letting other tasks run
+     * here (as Cinepak never does) was suspected of making MCIAVI stop
+     * instead of resuming */
+    rc = CallHelperEx(TRUE);
     if (rc != (DWORD)ICERR_OK) return ICERR_INTERNAL;
 
     pInst->hXvidHandle = g_pShared->handle;
@@ -623,7 +669,7 @@ static LRESULT icm_DecompressEnd(CODEC_INSTANCE FAR *pInst)
     if (pInst->hXvidHandle && g_bWin32s) {
         g_pShared->cmd    = IPC_CMD_CLOSE;
         g_pShared->handle = pInst->hXvidHandle;
-        CallHelper();
+        CallHelperEx(TRUE);   /* see icm_DecompressBegin */
         pInst->hXvidHandle = 0;
     }
     return ICERR_OK;
@@ -649,6 +695,7 @@ static LRESULT icm_Decompress(CODEC_INSTANCE FAR *pInst,
 
     csp = BitmapToCSP(lpbiDst);
     if (!csp) return ICERR_BADFORMAT;
+    if (!SameSize(lpbiSrc, lpbiDst)) return ICERR_BADFORMAT;
 
     if (pInst->nFrames == 0) pInst->tStart = timeGetTime();
     pInst->nFrames++;
@@ -712,7 +759,14 @@ static LRESULT icm_DecompressEx(CODEC_INSTANCE FAR *pInst,
                                  DWORD dwFlags,
                                  ICDECOMPRESSEX FAR *pEx)
 {
-    /* If no sub-rects or scaling, call regular decompress */
+    /* Only the full frame, unscaled: anything else was refused at
+     * query time, so a mismatch here is a caller error */
+    if (!FullFrameEx(pEx)) {
+        DbgLog("DECOMPRESSEX: refused src %d,%d %dx%d dst %d,%d %dx%d",
+               pEx->xSrc, pEx->ySrc, pEx->dxSrc, pEx->dySrc,
+               pEx->xDst, pEx->yDst, pEx->dxDst, pEx->dyDst);
+        return ICERR_BADFORMAT;
+    }
     return icm_Decompress(pInst, dwFlags,
                           pEx->lpbiSrc, pEx->lpSrc,
                           pEx->lpbiDst, pEx->lpDst);
@@ -767,6 +821,15 @@ static void SetupFrameBitmap(CODEC_INSTANCE FAR *pInst, HDC hdc)
     if (!hdc || w < 3 || h < 1) return;
 
     bpp = GetDeviceCaps(hdc, BITSPIXEL) * GetDeviceCaps(hdc, PLANES);
+
+    /* [xvid16] ddb=0 in WIN.INI or SYSTEM.INI forces the 24-bit DIB path,
+     * e.g. for display drivers whose SetBitmapBits misbehaves */
+    if (!GetProfileInt("xvid16", "ddb", 1) ||
+        !GetPrivateProfileInt("xvid16", "ddb", 1, "SYSTEM.INI")) {
+        DbgLog("DRAW_BEGIN: screen %d bpp, ddb=0, using 24-bit DIB", bpp);
+        return;
+    }
+
     if (GetDeviceCaps(hdc, PLANES) != 1 ||
         (bpp != 16 && bpp != 24 && bpp != 32)) {
         DbgLog("DRAW_BEGIN: screen %d bpp, using 24-bit DIB", bpp);
@@ -1130,15 +1193,46 @@ static LRESULT icm_DrawEnd(CODEC_INSTANCE FAR *pInst)
 /* ------------------------------------------------------------------ */
 /*  DriverProc - main entry point for installable codec                */
 /* ------------------------------------------------------------------ */
+static LRESULT DriverProcInner(DWORD dwDriverId, HDRVR hDriver,
+                               WORD wMessage, LONG lParam1, LONG lParam2);
+
+/* [xvid16] debug=2: trace every driver message and its result, except
+ * the per-frame ones, to see exactly what callers ask around events
+ * like a window resize */
+static int DbgLevel(void)
+{
+    int n = GetProfileInt("xvid16", "debug", 0);
+    int m = GetPrivateProfileInt("xvid16", "debug", 0, "SYSTEM.INI");
+    return n > m ? n : m;
+}
+
 LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
                                        HDRVR  hDriver,
                                        WORD   wMessage,
                                        LONG   lParam1,
                                        LONG   lParam2)
 {
+    LRESULT lr;
+    BOOL bTrace = wMessage != ICM_DECOMPRESS && wMessage != ICM_DRAW &&
+                  wMessage != ICM_DECOMPRESSEX && DbgLevel() >= 2;
+
+    lr = DriverProcInner(dwDriverId, hDriver, wMessage, lParam1, lParam2);
+    if (bTrace)
+        DbgLog("MSG %04X id %lu p1 %08lX p2 %08lX -> %08lX", wMessage,
+               dwDriverId, lParam1, lParam2, (DWORD)lr);
+    return lr;
+}
+
+static LRESULT DriverProcInner(DWORD dwDriverId, HDRVR hDriver,
+                               WORD wMessage, LONG lParam1, LONG lParam2)
+{
     CODEC_INSTANCE FAR *pInst = GetInstance(dwDriverId);
 
     (void)hDriver;
+
+    if (g_nWaitDepth > 0)
+        DbgLog("REENTRY: msg %04X id %lu on task %04X during helper wait",
+               wMessage, dwDriverId, (WORD)GetCurrentTask());
 
     switch (wMessage) {
 
@@ -1243,7 +1337,16 @@ LRESULT FAR PASCAL __loadds DriverProc(DWORD dwDriverId,
     case ICM_DECOMPRESSEX_QUERY:
         {
             ICDECOMPRESSEX FAR *p = (ICDECOMPRESSEX FAR *)lParam1;
-            return icm_DecompressQuery(p->lpbiSrc, p->lpbiDst);
+            LRESULT lr;
+            if (!p) return ICERR_BADPARAM;
+            lr = icm_DecompressQuery(p->lpbiSrc, p->lpbiDst);
+            if (lr == ICERR_OK && p->lpbiDst && !FullFrameEx(p)) {
+                DbgLog("DECOMPRESSEX_QUERY: refused src %d,%d %dx%d "
+                       "dst %d,%d %dx%d", p->xSrc, p->ySrc, p->dxSrc,
+                       p->dySrc, p->xDst, p->yDst, p->dxDst, p->dyDst);
+                lr = ICERR_BADFORMAT;
+            }
+            return lr;
         }
 
     case ICM_DECOMPRESSEX_BEGIN:

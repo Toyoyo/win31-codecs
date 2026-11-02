@@ -306,6 +306,13 @@ static void InitThunk(void)
     HMODULE hMod;
     int i;
 
+    /* [xvid16] thunk=0 in WIN.INI or SYSTEM.INI disables it, for testing */
+    if (!GetProfileIntA("xvid16", "thunk", 1) ||
+        !GetPrivateProfileIntA("xvid16", "thunk", 1, "SYSTEM.INI")) {
+        Log("thunk: disabled by thunk=0");
+        return;
+    }
+
     for (i = 0; i < 2 && !pfnRegister; i++) {
         hMod = GetModuleHandleA(mods[i]);
         if (!hMod) hMod = LoadLibraryA(mods[i]);
